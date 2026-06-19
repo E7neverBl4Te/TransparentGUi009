@@ -9829,6 +9829,21 @@ playOpenAnimation()
 --   Players, TweenService, LocalPlayer already declared near the top
 --   of the merged script. Only RunService is new here.
 -- ══════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════
+--   REGISTER-LIMIT FIX: the main chunk (this whole script) is itself
+--   one Luau function, capped at 200 local registers. The original
+--   tool already used a large share of that budget before DAL was
+--   ever appended, so DAL's ~20+ additional top-level locals (SEV,
+--   VTYPE, MUTATIONS, DALSink, COL, mkFrame, mkLabel, buildPanel,
+--   etc.) pushed the main chunk over the limit.
+--
+--   Fix: wrap the entire DAL definition in an IIFE (a genuine nested
+--   function). A real function boundary gets its OWN independent
+--   200-register budget, completely separate from the main chunk's.
+--   Only the single returned DAL table costs the main chunk a
+--   register, instead of every internal helper and local DAL uses.
+-- ══════════════════════════════════════════════════════════════════
+local DAL = (function()
 local RunService = game:GetService("RunService")
 
 -- ══════════════════════════════════════════════════════════════════
@@ -11071,6 +11086,9 @@ function DAL:init(parent)
     self:startCrawlLoop()
     return self.panel
 end
+
+    return DAL
+end)()
 
 
 -- ════════════════════════════════════════════════════════════════════
