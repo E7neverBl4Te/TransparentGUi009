@@ -10960,6 +10960,146 @@ local function buildC2LogTab(c2Page, PW, PH)
     DALSink.onEntry = function(_) rebuildC2() end
 end
 
+-- ── STATS DASHBOARD ──────────────────────────────────────────────────
+-- Always-visible live counters: remotes found, total violations,
+-- critical+ count, confirmed SB-RCE count. This is what makes DAL
+-- read as a live control center instead of a static list -- numbers
+-- that visibly tick up and pulse as the tool works.
+local function buildStatsBar(root, PW)
+    local bar = Instance.new("Frame")
+    bar.Name                   = "StatsBar"
+    bar.Position               = UDim2.fromOffset(0, 32)
+    bar.Size                   = UDim2.new(1, 0, 0, 34)
+    bar.BackgroundColor3       = Color3.fromRGB(8, 10, 18)
+    bar.BackgroundTransparency = 0.05
+    bar.BorderSizePixel        = 0
+    bar.ZIndex                 = 51
+    bar.Parent                 = root
+
+    local function statBlock(x, label, color)
+        local w = 100
+        local f = Instance.new("Frame")
+        f.Position               = UDim2.fromOffset(x, 4)
+        f.Size                   = UDim2.fromOffset(w, 26)
+        f.BackgroundColor3       = color
+        f.BackgroundTransparency = 0.82
+        f.BorderSizePixel        = 0
+        f.ZIndex                 = 52
+        f.Parent                 = bar
+        uiCorner(f, 5)
+        uiStroke(f, color, 0.45, 1)
+
+        local num = Instance.new("TextLabel")
+        num.Position               = UDim2.fromOffset(6, 1)
+        num.Size                   = UDim2.fromOffset(34, 24)
+        num.BackgroundTransparency = 1
+        num.Text                   = "0"
+        num.Font                   = Enum.Font.GothamBlack
+        num.TextSize               = 16
+        num.TextColor3             = color
+        num.TextXAlignment         = Enum.TextXAlignment.Left
+        num.ZIndex                 = 53
+        num.Parent                 = f
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Position               = UDim2.fromOffset(40, 0)
+        lbl.Size                   = UDim2.fromOffset(w - 44, 26)
+        lbl.BackgroundTransparency = 1
+        lbl.Text                   = label
+        lbl.Font                   = Enum.Font.GothamBold
+        lbl.TextSize               = 6
+        lbl.TextColor3             = color
+        lbl.TextWrapped            = true
+        lbl.TextXAlignment         = Enum.TextXAlignment.Left
+        lbl.ZIndex                 = 53
+        lbl.Parent                 = f
+
+        return num, f
+    end
+
+    local remNum,  remBlock  = statBlock(6,   "REMOTES\nFOUND",     Color3.fromRGB( 90, 180, 255))
+    local violNum, violBlock = statBlock(112, "TOTAL\nVIOLATIONS",  Color3.fromRGB(220, 175,  50))
+    local critNum, critBlock = statBlock(218, "CRITICAL+\nFOUND",   Color3.fromRGB(228,  60,  80))
+    local rceNum,  rceBlock  = statBlock(324, "SB-RCE\nCONFIRMED",  Color3.fromRGB(200,  40, 220))
+
+    local function pulse(block)
+        TweenService:Create(block, TweenInfo.new(0.08), { BackgroundTransparency = 0.40 }):Play()
+        task.delay(0.08, function()
+            TweenService:Create(block, TweenInfo.new(0.35), { BackgroundTransparency = 0.82 }):Play()
+        end)
+    end
+
+    local function updateStats()
+        local remCount = 0
+        for _ in pairs(DAL.discovered) do remCount = remCount + 1 end
+
+        local violCount, critCount, rceCount = 0, 0, 0
+        for _, v in ipairs(DAL.violations) do
+            violCount = violCount + 1
+            if v.severity.score >= SEV.CRITICAL.score then critCount = critCount + 1 end
+            if v.severity == SEV.RCE then rceCount = rceCount + 1 end
+        end
+
+        if remNum.Text  ~= tostring(remCount)  then remNum.Text  = tostring(remCount);  pulse(remBlock)  end
+        if violNum.Text ~= tostring(violCount) then violNum.Text = tostring(violCount); pulse(violBlock) end
+        if critNum.Text ~= tostring(critCount) then critNum.Text = tostring(critCount); pulse(critBlock) end
+        if rceNum.Text  ~= tostring(rceCount)  then rceNum.Text  = tostring(rceCount);  pulse(rceBlock)  end
+    end
+
+    return updateStats
+end
+
+-- ── CRITICAL ALERT BANNER ────────────────────────────────────────────
+-- Slides down over the header when a CRITICAL or SB-RCE violation
+-- lands, then retracts after a few seconds. Makes the tool feel like
+-- it's actively watching rather than a static report you have to
+-- go check on yourself.
+local function buildAlertBanner(root, PW)
+    local banner = Instance.new("Frame")
+    banner.Name                   = "AlertBanner"
+    banner.Position               = UDim2.fromOffset(0, -28)
+    banner.Size                   = UDim2.new(1, 0, 0, 26)
+    banner.BackgroundColor3       = Color3.fromRGB(228, 60, 80)
+    banner.BackgroundTransparency = 0.15
+    banner.BorderSizePixel        = 0
+    banner.ZIndex                 = 80
+    banner.Visible                = false
+    banner.Parent                 = root
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                   = UDim2.new(1, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Font                   = Enum.Font.GothamBlack
+    lbl.TextSize               = 10
+    lbl.TextColor3             = Color3.fromRGB(255, 235, 240)
+    lbl.Text                   = ""
+    lbl.ZIndex                 = 81
+    lbl.Parent                 = banner
+
+    local hideToken = 0
+    local function trigger(v)
+        hideToken = hideToken + 1
+        local myToken = hideToken
+        local isRCE = (v.severity.label == "SB-RCE")
+        banner.BackgroundColor3 = isRCE and Color3.fromRGB(200, 40, 220) or Color3.fromRGB(228, 60, 80)
+        lbl.Text = string.format("⚠  %s  —  %s  —  %s",
+            v.severity.label, v.vtype, v.remotePath)
+        banner.Visible  = true
+        banner.Position = UDim2.fromOffset(0, -28)
+        TweenService:Create(banner, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+            { Position = UDim2.fromOffset(0, 0) }):Play()
+        task.delay(3.2, function()
+            if myToken ~= hideToken then return end
+            TweenService:Create(banner, TweenInfo.new(0.25), { Position = UDim2.fromOffset(0, -28) }):Play()
+            task.delay(0.25, function()
+                if myToken == hideToken then banner.Visible = false end
+            end)
+        end)
+    end
+
+    return trigger
+end
+
 local function buildPanel(parentGui)
 
     -- Root -- fills the entire DAL tab page
@@ -10974,7 +11114,7 @@ local function buildPanel(parentGui)
     root.ZIndex                 = 5
     root.Parent                 = parentGui
     uiCorner(root, 8)
-    uiStroke(root, COL.BORDER, 0.35, 1)
+    local rootStroke = uiStroke(root, COL.BORDER, 0.35, 1)
 
     -- ── Header ───────────────────────────────────────────────────
     local hdr = mkFrame(root, 0, 0, PANEL_W, 32, COL.HDR, 0.08, 51)
@@ -10998,12 +11138,24 @@ local function buildPanel(parentGui)
         modeBtn.BackgroundColor3 = mc.bg
         modeBtn.TextColor3       = mc.text
         uiStroke(modeBtn, mc.bg, 0.55, 1)
+        -- Tie the whole panel's border glow to the active mode --
+        -- this is part of what makes it read as a live control
+        -- center rather than a static tool.
+        TweenService:Create(rootStroke, TweenInfo.new(0.30), { Color = mc.bg }):Play()
     end)
+
+    -- ── Stats dashboard + critical alert banner ────────────────────
+    -- Live counters and a flashing top banner. This is the piece that
+    -- makes the panel feel like it's actively watching instead of
+    -- just listing things.
+    local updateStats  = buildStatsBar(root, PANEL_W)
+    local triggerAlert = buildAlertBanner(root, PANEL_W)
+    local STATS_H = 34
 
     -- ── Tab bar ──────────────────────────────────────────────────
     local TAB_H  = 26
-    local tabBar = mkFrame(root, 0, 32, PANEL_W, TAB_H, Color3.fromRGB(12, 14, 24), 0.15, 51)
-    local CONTENT_Y = 32 + TAB_H
+    local tabBar = mkFrame(root, 0, 32 + STATS_H, PANEL_W, TAB_H, Color3.fromRGB(12, 14, 24), 0.15, 51)
+    local CONTENT_Y = 32 + STATS_H + TAB_H
 
     local tabDefs = {
         { label = "REMOTES",    accent = Color3.fromRGB( 90, 180, 255) },
@@ -11068,10 +11220,26 @@ local function buildPanel(parentGui)
     buildFuzzerTab(pages[3], PW, PH, rebuildViolations)
     buildC2LogTab(pages[4], PW, PH)
 
-    -- ── Wire DAL discovery → remote list rebuild ──────────────────
+    -- ── Wire discovery → remote list + live stats ──────────────────
     DAL.onDiscovery = function()
         rebuildRemoteList()
+        updateStats()
     end
+
+    -- ── Wire violations → live stats + critical alert banner ───────
+    -- buildViolationsTab already chained itself onto DAL.onViolation
+    -- (to call rebuildViolations). Chain onto THAT here so the stats
+    -- bar and alert banner update on every single violation too.
+    local _prevOnViolation = DAL.onViolation
+    DAL.onViolation = function(v)
+        if _prevOnViolation then _prevOnViolation(v) end
+        updateStats()
+        if v.severity.score >= SEV.CRITICAL.score then
+            triggerAlert(v)
+        end
+    end
+
+    updateStats()  -- initial paint, all zeros
 
     return root
 end
