@@ -2174,8 +2174,17 @@ local function openCtxMenu(node, canvasPos)
         + FOOT_H
 
     -- -- Canvas-clamped position -----------------------------------
+    -- Use visible menu height (capped at MAX_ROWS) for vertical clamping,
+    -- not the total scrollable canvas height. A 30-row service list would
+    -- otherwise push cy below the canvas floor and snap the whole menu up.
+    local visibleMenuH = HDR_H + SEP
+        + scanLblH + (scanLblH > 0 and SEP or 0)
+        + rowAreaH + SEP   -- rowAreaH already capped at MAX_ROWS * ROW_H
+        + ibH
+        + CTRL_H + SEP
+        + FOOT_H
     local cx = math.min(canvasPos.X, graphCanvas.AbsoluteSize.X - CTX_W - 4)
-    local cy = math.min(canvasPos.Y, graphCanvas.AbsoluteSize.Y - totalH - 4)
+    local cy = math.min(canvasPos.Y, graphCanvas.AbsoluteSize.Y - visibleMenuH - 4)
     cx = math.max(cx, 2)
     cy = math.max(cy, 2)
 
@@ -12773,6 +12782,18 @@ function DAL:applyToNode(report)
     newNode.leverageReport  = report
     newNode.leverageSource  = report.remotePath
     newNode.inputValue      = report.remotePath
+
+    -- Set the live Instance reference so the Execute chain can
+    -- actually fire this remote. Without targetInst the chain sees
+    -- the node as unconfigured and refuses to run.
+    -- Only REMOTE and BINDABLE nodes need a live Instance;
+    -- SERVICE nodes reference a Roblox service, not a RemoteEvent.
+    local discoveredRec = DAL.discovered[report.remotePath]
+    if discoveredRec and discoveredRec.inst then
+        if report.nodeTypeId == "REMOTE" or report.nodeTypeId == "BINDABLE" then
+            newNode.targetInst = discoveredRec.inst
+        end
+    end
 
     -- Log to DALSink
     DALSink:push({
