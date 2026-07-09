@@ -11945,8 +11945,8 @@ local function buildPanel(parentGui)
     local rebuildViolations = buildViolationsTab(pages[2], PW, PH)
     buildFuzzerTab(pages[3], PW, PH, rebuildViolations)
     buildC2LogTab(pages[4], PW, PH)
-    buildLeverageTab(pages[5], PW, PH, switchTab)
-    buildSpsTab(pages[6], PW, PH)
+    DAL.buildLeverageTab(pages[5], PW, PH, switchTab)
+    DAL.buildSpsTab(pages[6], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -13006,6 +13006,12 @@ end
 -- the scope boundary without restructuring the whole module.
 DAL.showLeveragePanel  = showLeveragePanel
 DAL.closeLeveragePanel = closeLeveragePanel
+
+-- Same fix for the two tab builder functions that buildPanel calls.
+-- buildLeverageTab and buildSpsTab are local to this IIFE; buildPanel
+-- lives outside it and can't see them directly.
+DAL.buildLeverageTab = buildLeverageTab
+DAL.buildSpsTab      = buildSpsTab
 
     return DAL
 end)()
