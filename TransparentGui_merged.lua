@@ -2259,247 +2259,267 @@ local function openServiceDetailPanel(serviceName, anchorMenu, canvas)
     closeServiceDetail()
     if not anchorMenu or not canvas then return end
 
-    local detail = SERVICE_DETAILS[serviceName] or SERVICE_DETAIL_DEFAULT
-    local methods = detail.methods
-    local ROW_H  = 36
-    local HDR_H  = 52
-    local FOOT_H = 8
-    local DET_W  = 230
-    local MAX_VIS = 6
-    local visRows = math.min(#methods, MAX_VIS)
+    local detail   = SERVICE_DETAILS[serviceName] or SERVICE_DETAIL_DEFAULT
+    local methods  = detail.methods
+    local ROW_H    = 36
+    local HDR_H    = 54
+    local DET_W    = 230
+    local MAX_VIS  = 6
+    local visRows  = math.min(#methods, MAX_VIS)
     local rowAreaH = visRows * ROW_H
-    local totalH = HDR_H + rowAreaH + FOOT_H
+    local totalH   = HDR_H + rowAreaH + 6
 
-    -- Position: to the right of anchor menu, clamped to canvas
-    local ax = anchorMenu.Position.X.Offset + anchorMenu.AbsoluteSize.X + 6
-    local ay = anchorMenu.Position.Y.Offset
-    ax = math.min(ax, canvas.AbsoluteSize.X - DET_W - 4)
-    ay = math.min(ay, canvas.AbsoluteSize.Y - totalH - 4)
+    -- Use Size.X.Offset (declared size) not AbsoluteSize (0 on newly-created frames)
+    local menuX = anchorMenu.Position.X.Offset
+    local menuW = anchorMenu.Size.X.Offset
+    local menuY = anchorMenu.Position.Y.Offset
+
+    local canvW = canvas.AbsoluteSize.X > 0 and canvas.AbsoluteSize.X or 800
+    local canvH = canvas.AbsoluteSize.Y > 0 and canvas.AbsoluteSize.Y or 600
+
+    local ax = menuX + menuW + 8
+    local ay = menuY
+    ax = math.min(ax, canvW - DET_W - 4)
+    ay = math.min(ay, canvH - totalH - 4)
     ax = math.max(ax, 2)
     ay = math.max(ay, 2)
 
-    -- Panel shell
+    -- Panel shell parented to canvas at ZIndex 60 (above ctxMenu at 40)
     local panel = Instance.new("Frame")
     panel.Name                   = "ServiceDetailPanel"
     panel.Size                   = UDim2.fromOffset(DET_W, totalH)
     panel.Position               = UDim2.fromOffset(ax, ay)
     panel.BackgroundColor3       = Color3.fromRGB(10, 12, 22)
-    panel.BackgroundTransparency = 0.10
+    panel.BackgroundTransparency = 0.08
     panel.BorderSizePixel        = 0
-    panel.ZIndex                 = 50
-    panel.ClipsDescendants       = false
+    panel.ZIndex                 = 60
+    panel.ClipsDescendants       = true
     panel.Parent                 = canvas
-
-    local function pc(r,g,b) return Color3.fromRGB(r,g,b) end
-    local BORDER = pc(80,110,200)
-    local TEXT   = pc(220,228,248)
-    local DIM    = pc(110,125,165)
-
-    local cornerP = Instance.new("UICorner")
-    cornerP.CornerRadius = UDim.new(0, 8)
-    cornerP.Parent = panel
-
-    local strokeP = Instance.new("UIStroke")
-    strokeP.Color = BORDER
-    strokeP.Transparency = 0.35
-    strokeP.Thickness = 1
-    strokeP.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    strokeP.Parent = panel
-
     ctxDetail = panel
 
-    -- Connector line (visual bridge to the context menu)
-    local connector = Instance.new("Frame")
-    connector.Size = UDim2.fromOffset(8, 2)
-    connector.Position = UDim2.fromOffset(ax - 8, ay + HDR_H / 2)
-    connector.BackgroundColor3 = BORDER
-    connector.BackgroundTransparency = 0.55
-    connector.BorderSizePixel = 0
-    connector.ZIndex = 49
-    connector.Parent = canvas
+    local BORDER = Color3.fromRGB(80, 110, 200)
+    local TEXT   = Color3.fromRGB(220, 228, 248)
+    local DIM    = Color3.fromRGB(110, 125, 165)
+
+    local panCorner = Instance.new("UICorner")
+    panCorner.CornerRadius = UDim.new(0, 8)
+    panCorner.Parent = panel
+
+    local panStroke = Instance.new("UIStroke")
+    panStroke.Color = BORDER
+    panStroke.Transparency = 0.30
+    panStroke.Thickness = 1
+    panStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    panStroke.Parent = panel
+
+    -- Connector bridge (outside panel so it isn't clipped)
+    local bridge = Instance.new("Frame")
+    bridge.Size               = UDim2.fromOffset(10, 2)
+    bridge.Position           = UDim2.fromOffset(menuX + menuW, menuY + 22)
+    bridge.BackgroundColor3   = BORDER
+    bridge.BackgroundTransparency = 0.50
+    bridge.BorderSizePixel    = 0
+    bridge.ZIndex             = 59
+    bridge.Parent             = canvas
 
     -- Header
     local hdr = Instance.new("Frame")
-    hdr.Size = UDim2.fromOffset(DET_W, HDR_H)
-    hdr.Position = UDim2.fromOffset(0, 0)
-    hdr.BackgroundColor3 = pc(14, 18, 32)
-    hdr.BackgroundTransparency = 0.10
-    hdr.BorderSizePixel = 0
-    hdr.ZIndex = 51
-    hdr.Parent = panel
+    hdr.Size                   = UDim2.fromOffset(DET_W, HDR_H)
+    hdr.Position               = UDim2.fromOffset(0, 0)
+    hdr.BackgroundColor3       = Color3.fromRGB(14, 18, 34)
+    hdr.BackgroundTransparency = 0.08
+    hdr.BorderSizePixel        = 0
+    hdr.ZIndex                 = 61
+    hdr.Parent                 = panel
 
     local hdrCorner = Instance.new("UICorner")
     hdrCorner.CornerRadius = UDim.new(0, 8)
     hdrCorner.Parent = hdr
 
-    -- Accent left stripe
+    -- Accent stripe
     local stripe = Instance.new("Frame")
-    stripe.Size = UDim2.fromOffset(3, HDR_H)
-    stripe.Position = UDim2.fromOffset(0, 0)
-    stripe.BackgroundColor3 = BORDER
+    stripe.Size               = UDim2.fromOffset(3, HDR_H)
+    stripe.Position           = UDim2.fromOffset(0, 0)
+    stripe.BackgroundColor3   = BORDER
     stripe.BackgroundTransparency = 0.0
-    stripe.BorderSizePixel = 0
-    stripe.ZIndex = 52
-    stripe.Parent = hdr
+    stripe.BorderSizePixel    = 0
+    stripe.ZIndex             = 62
+    stripe.Parent             = hdr
 
     local stripeCorner = Instance.new("UICorner")
     stripeCorner.CornerRadius = UDim.new(0, 2)
     stripeCorner.Parent = stripe
 
-    -- Service name
+    -- Service name label
     local nameL = Instance.new("TextLabel")
-    nameL.Size = UDim2.fromOffset(DET_W - 30, 18)
-    nameL.Position = UDim2.fromOffset(10, 4)
+    nameL.Size                   = UDim2.fromOffset(DET_W - 30, 18)
+    nameL.Position               = UDim2.fromOffset(10, 3)
     nameL.BackgroundTransparency = 1
-    nameL.Text = serviceName
-    nameL.TextSize = 10
-    nameL.Font = Enum.Font.GothamBold
-    nameL.TextColor3 = TEXT
-    nameL.TextXAlignment = Enum.TextXAlignment.Left
-    nameL.TextYAlignment = Enum.TextYAlignment.Center
-    nameL.BorderSizePixel = 0
-    nameL.ZIndex = 52
-    nameL.Parent = hdr
+    nameL.Text                   = serviceName
+    nameL.TextSize               = 10
+    nameL.Font                   = Enum.Font.GothamBold
+    nameL.TextColor3             = TEXT
+    nameL.TextXAlignment         = Enum.TextXAlignment.Left
+    nameL.TextYAlignment         = Enum.TextYAlignment.Center
+    nameL.BorderSizePixel        = 0
+    nameL.ZIndex                 = 62
+    nameL.Parent                 = hdr
 
     -- Close button
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.fromOffset(16, 16)
-    closeBtn.Position = UDim2.fromOffset(DET_W - 20, 6)
-    closeBtn.BackgroundColor3 = pc(180, 40, 40)
-    closeBtn.BackgroundTransparency = 0.55
-    closeBtn.BorderSizePixel = 0
-    closeBtn.Text = "x"
-    closeBtn.TextSize = 8
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextColor3 = TEXT
-    closeBtn.ZIndex = 52
-    closeBtn.Parent = hdr
+    local closeF = Instance.new("Frame")
+    closeF.Size               = UDim2.fromOffset(14, 14)
+    closeF.Position           = UDim2.fromOffset(DET_W - 20, 5)
+    closeF.BackgroundColor3   = Color3.fromRGB(180, 40, 40)
+    closeF.BackgroundTransparency = 0.50
+    closeF.BorderSizePixel    = 0
+    closeF.ZIndex             = 62
+    closeF.Parent             = hdr
 
-    local closeBtnCorner = Instance.new("UICorner")
-    closeBtnCorner.CornerRadius = UDim.new(0, 3)
-    closeBtnCorner.Parent = closeBtn
-    closeBtn.MouseButton1Click:Connect(closeServiceDetail)
+    local closeFCorner = Instance.new("UICorner")
+    closeFCorner.CornerRadius = UDim.new(0, 3)
+    closeFCorner.Parent = closeF
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size                   = UDim2.fromOffset(14, 14)
+    closeBtn.Position               = UDim2.fromOffset(0, 0)
+    closeBtn.BackgroundTransparency = 1
+    closeBtn.Text                   = "x"
+    closeBtn.TextSize               = 8
+    closeBtn.Font                   = Enum.Font.GothamBold
+    closeBtn.TextColor3             = TEXT
+    closeBtn.ZIndex                 = 63
+    closeBtn.Parent                 = closeF
+    closeBtn.MouseButton1Click:Connect(function()
+        bridge:Destroy()
+        closeServiceDetail()
+    end)
 
     -- Description
     local descL = Instance.new("TextLabel")
-    descL.Size = UDim2.fromOffset(DET_W - 14, HDR_H - 26)
-    descL.Position = UDim2.fromOffset(10, 24)
+    descL.Size                   = UDim2.fromOffset(DET_W - 14, HDR_H - 22)
+    descL.Position               = UDim2.fromOffset(8, 22)
     descL.BackgroundTransparency = 1
-    descL.Text = detail.desc:sub(1, 120)
-    descL.TextSize = 7
-    descL.Font = Enum.Font.Gotham
-    descL.TextColor3 = DIM
-    descL.TextWrapped = true
-    descL.TextXAlignment = Enum.TextXAlignment.Left
-    descL.TextYAlignment = Enum.TextYAlignment.Top
-    descL.BorderSizePixel = 0
-    descL.ZIndex = 52
-    descL.Parent = hdr
+    descL.Text                   = detail.desc:sub(1, 110)
+    descL.TextSize               = 7
+    descL.Font                   = Enum.Font.Gotham
+    descL.TextColor3             = DIM
+    descL.TextWrapped            = true
+    descL.TextXAlignment         = Enum.TextXAlignment.Left
+    descL.TextYAlignment         = Enum.TextYAlignment.Top
+    descL.BorderSizePixel        = 0
+    descL.ZIndex                 = 62
+    descL.Parent                 = hdr
 
-    -- Methods scroll area
+    -- Divider
+    local div = Instance.new("Frame")
+    div.Size               = UDim2.fromOffset(DET_W, 1)
+    div.Position           = UDim2.fromOffset(0, HDR_H)
+    div.BackgroundColor3   = BORDER
+    div.BackgroundTransparency = 0.60
+    div.BorderSizePixel    = 0
+    div.ZIndex             = 61
+    div.Parent             = panel
+
+    -- Methods scroll
     local scroll = Instance.new("ScrollingFrame")
-    scroll.Size = UDim2.fromOffset(DET_W, rowAreaH)
-    scroll.Position = UDim2.fromOffset(0, HDR_H)
-    scroll.BackgroundTransparency = 1
-    scroll.BorderSizePixel = 0
-    scroll.ScrollBarThickness = (#methods > MAX_VIS) and 3 or 0
-    scroll.ScrollBarImageColor3 = BORDER
+    scroll.Size                       = UDim2.fromOffset(DET_W, rowAreaH)
+    scroll.Position                   = UDim2.fromOffset(0, HDR_H + 1)
+    scroll.BackgroundTransparency     = 1
+    scroll.BorderSizePixel            = 0
+    scroll.ScrollBarThickness         = (#methods > MAX_VIS) and 3 or 0
+    scroll.ScrollBarImageColor3       = BORDER
     scroll.ScrollBarImageTransparency = 0.40
-    scroll.CanvasSize = UDim2.fromOffset(DET_W, #methods * ROW_H)
-    scroll.ZIndex = 51
-    scroll.Parent = panel
+    scroll.CanvasSize                 = UDim2.fromOffset(0, #methods * ROW_H)
+    scroll.ZIndex                     = 61
+    scroll.Parent                     = panel
 
     local ll = Instance.new("UIListLayout")
     ll.SortOrder = Enum.SortOrder.LayoutOrder
-    ll.Padding = UDim.new(0, 1)
-    ll.Parent = scroll
+    ll.Padding   = UDim.new(0, 1)
+    ll.Parent    = scroll
 
     for i, m in ipairs(methods) do
         local riskCol = RISK_COL[m.risk] or DIM
+        local BZ = 62
 
         local row = Instance.new("Frame")
-        row.Size = UDim2.fromOffset(DET_W, ROW_H)
-        row.BackgroundColor3 = pc(16, 20, 36)
+        row.Size                   = UDim2.fromOffset(DET_W, ROW_H)
+        row.BackgroundColor3       = Color3.fromRGB(16, 20, 36)
         row.BackgroundTransparency = 0.45
-        row.BorderSizePixel = 0
-        row.LayoutOrder = i
-        row.ZIndex = 52
-        row.Parent = scroll
+        row.BorderSizePixel        = 0
+        row.LayoutOrder            = i
+        row.ZIndex                 = BZ
+        row.Parent                 = scroll
 
-        -- Risk stripe
-        local rStripe = Instance.new("Frame")
-        rStripe.Size = UDim2.fromOffset(3, ROW_H)
-        rStripe.Position = UDim2.fromOffset(0, 0)
-        rStripe.BackgroundColor3 = riskCol
-        rStripe.BackgroundTransparency = 0.30
-        rStripe.BorderSizePixel = 0
-        rStripe.ZIndex = 53
-        rStripe.Parent = row
+        local rstripe = Instance.new("Frame")
+        rstripe.Size               = UDim2.fromOffset(3, ROW_H)
+        rstripe.BackgroundColor3   = riskCol
+        rstripe.BackgroundTransparency = 0.25
+        rstripe.BorderSizePixel    = 0
+        rstripe.ZIndex             = BZ + 1
+        rstripe.Parent             = row
 
-        -- Risk badge
         local badge = Instance.new("Frame")
-        badge.Size = UDim2.fromOffset(28, 13)
-        badge.Position = UDim2.fromOffset(8, 4)
-        badge.BackgroundColor3 = riskCol
-        badge.BackgroundTransparency = 0.65
-        badge.BorderSizePixel = 0
-        badge.ZIndex = 53
-        badge.Parent = row
+        badge.Size               = UDim2.fromOffset(30, 13)
+        badge.Position           = UDim2.fromOffset(7, 5)
+        badge.BackgroundColor3   = riskCol
+        badge.BackgroundTransparency = 0.62
+        badge.BorderSizePixel    = 0
+        badge.ZIndex             = BZ + 1
+        badge.Parent             = row
 
-        local badgeCorner = Instance.new("UICorner")
-        badgeCorner.CornerRadius = UDim.new(0, 3)
-        badgeCorner.Parent = badge
+        local badgeC = Instance.new("UICorner")
+        badgeC.CornerRadius = UDim.new(0, 3)
+        badgeC.Parent = badge
 
         local badgeLbl = Instance.new("TextLabel")
-        badgeLbl.Size = UDim2.fromOffset(28, 13)
+        badgeLbl.Size                   = UDim2.fromOffset(30, 13)
         badgeLbl.BackgroundTransparency = 1
-        badgeLbl.Text = m.risk
-        badgeLbl.TextSize = 6
-        badgeLbl.Font = Enum.Font.GothamBold
-        badgeLbl.TextColor3 = riskCol
-        badgeLbl.TextXAlignment = Enum.TextXAlignment.Center
-        badgeLbl.BorderSizePixel = 0
-        badgeLbl.ZIndex = 54
-        badgeLbl.Parent = badge
+        badgeLbl.Text                   = m.risk
+        badgeLbl.TextSize               = 6
+        badgeLbl.Font                   = Enum.Font.GothamBold
+        badgeLbl.TextColor3             = riskCol
+        badgeLbl.TextXAlignment         = Enum.TextXAlignment.Center
+        badgeLbl.BorderSizePixel        = 0
+        badgeLbl.ZIndex                 = BZ + 2
+        badgeLbl.Parent                 = badge
 
-        -- Method name
-        local mLabel = Instance.new("TextLabel")
-        mLabel.Size = UDim2.fromOffset(DET_W - 50, 14)
-        mLabel.Position = UDim2.fromOffset(40, 2)
-        mLabel.BackgroundTransparency = 1
-        mLabel.Text = m.m
-        mLabel.TextSize = 8
-        mLabel.Font = Enum.Font.GothamBold
-        mLabel.TextColor3 = TEXT
-        mLabel.TextXAlignment = Enum.TextXAlignment.Left
-        mLabel.TextTruncate = Enum.TextTruncate.AtEnd
-        mLabel.BorderSizePixel = 0
-        mLabel.ZIndex = 53
-        mLabel.Parent = row
+        local mLbl = Instance.new("TextLabel")
+        mLbl.Size                   = UDim2.fromOffset(DET_W - 50, 14)
+        mLbl.Position               = UDim2.fromOffset(42, 3)
+        mLbl.BackgroundTransparency = 1
+        mLbl.Text                   = m.m
+        mLbl.TextSize               = 8
+        mLbl.Font                   = Enum.Font.GothamBold
+        mLbl.TextColor3             = TEXT
+        mLbl.TextXAlignment         = Enum.TextXAlignment.Left
+        mLbl.TextTruncate           = Enum.TextTruncate.AtEnd
+        mLbl.BorderSizePixel        = 0
+        mLbl.ZIndex                 = BZ + 1
+        mLbl.Parent                 = row
 
-        -- Description
-        local dLabel = Instance.new("TextLabel")
-        dLabel.Size = UDim2.fromOffset(DET_W - 12, ROW_H - 18)
-        dLabel.Position = UDim2.fromOffset(8, 18)
-        dLabel.BackgroundTransparency = 1
-        dLabel.Text = m.d:sub(1, 80)
-        dLabel.TextSize = 7
-        dLabel.Font = Enum.Font.Gotham
-        dLabel.TextColor3 = DIM
-        dLabel.TextXAlignment = Enum.TextXAlignment.Left
-        dLabel.TextWrapped = true
-        dLabel.BorderSizePixel = 0
-        dLabel.ZIndex = 53
-        dLabel.Parent = row
+        local dLbl = Instance.new("TextLabel")
+        dLbl.Size                   = UDim2.fromOffset(DET_W - 12, ROW_H - 19)
+        dLbl.Position               = UDim2.fromOffset(7, 19)
+        dLbl.BackgroundTransparency = 1
+        dLbl.Text                   = m.d:sub(1, 80)
+        dLbl.TextSize               = 7
+        dLbl.Font                   = Enum.Font.Gotham
+        dLbl.TextColor3             = DIM
+        dLbl.TextWrapped            = true
+        dLbl.TextXAlignment         = Enum.TextXAlignment.Left
+        dLbl.TextYAlignment         = Enum.TextYAlignment.Top
+        dLbl.BorderSizePixel        = 0
+        dLbl.ZIndex                 = BZ + 1
+        dLbl.Parent                 = row
 
-        -- Hover
         row.MouseEnter:Connect(function()
             TweenService:Create(row, TweenInfo.new(0.08),
-                { BackgroundTransparency = 0.20 }):Play()
+                {BackgroundTransparency=0.18}):Play()
         end)
         row.MouseLeave:Connect(function()
             TweenService:Create(row, TweenInfo.new(0.08),
-                { BackgroundTransparency = 0.45 }):Play()
+                {BackgroundTransparency=0.45}):Play()
         end)
     end
 end
