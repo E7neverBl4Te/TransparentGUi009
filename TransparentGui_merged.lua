@@ -2095,6 +2095,7 @@ end
 -- Close the context menu
 local function closeCtx()
     if ctxMenu then ctxMenu:Destroy() ctxMenu=nil end
+    closeServiceDetail()
     ctxNode = nil
 end
 
@@ -2116,6 +2117,387 @@ local function selectNode(node)
         for _, b in ipairs(node.brackets) do
             TweenService:Create(b, TweenInfo.new(0.12), { BackgroundTransparency = 0.0 }):Play()
         end
+    end
+end
+
+-- -- Service Detail Panel -------------------------------------------------------
+-- Appears to the right of the context menu when a SERVICE node row is clicked.
+-- Shows security-relevant methods for the selected service, their risk level,
+-- and lets the user pick a specific operation to track in the chain.
+
+local ctxDetail = nil   -- active detail panel Frame or nil
+
+local function closeServiceDetail()
+    if ctxDetail then ctxDetail:Destroy() ctxDetail = nil end
+end
+
+-- Per-service security method catalogue.
+-- Each entry: { m = "MethodName", risk = "HIGH"|"MED"|"LOW", d = "what it does" }
+local SERVICE_DETAILS = {
+    Workspace = {
+        desc = "Physical world container. Parts with client Network Ownership can be teleported by the client and replicate to the server.",
+        methods = {
+            { m = "FindFirstChild",     risk = "LOW", d = "Enumerate world objects." },
+            { m = "GetDescendants",     risk = "LOW", d = "Full subtree scan." },
+            { m = ":Touched event",     risk = "HIGH", d = "Fired by client-owned physics. Position not verified." },
+            { m = "SetNetworkOwner",    risk = "HIGH", d = "Assigns physics authority. Attacker can locally teleport parts." },
+            { m = "GetNetworkOwner",    risk = "MED",  d = "Read physics authority. Useful for ownership mapping." },
+        },
+    },
+    Players = {
+        desc = "Player instances, join/leave events. Identity spoofing targets this service via UserId substitution.",
+        methods = {
+            { m = "GetPlayerByUserId",  risk = "MED",  d = "Lookup by ID. If ID is client-supplied: identity spoof vector." },
+            { m = "FindFirstChild",     risk = "MED",  d = "Find player by Name. Client-supplied name = spoof vector." },
+            { m = "PlayerAdded",        risk = "HIGH", d = "Persistent hook. RCE payload target -- inject here for persistence." },
+            { m = "GetPlayers",         risk = "LOW",  d = "Enumerate active players." },
+            { m = "LocalPlayer",        risk = "LOW",  d = "Client-only. Cannot be accessed server-side." },
+        },
+    },
+    ReplicatedStorage = {
+        desc = "Shared storage visible to all clients. Common staging area for RemoteEvents and ModuleScripts.",
+        methods = {
+            { m = "FindFirstChild",     risk = "LOW",  d = "Locate a Remote or Module." },
+            { m = "WaitForChild",       risk = "MED",  d = "Yields until object exists. Race window if name is client-supplied." },
+            { m = "RemoteEvent:Fire",   risk = "HIGH", d = "Cross-boundary trigger. Primary attack surface." },
+            { m = "RemoteFunction:Invoke", risk="HIGH",d = "Bidirectional call. Server blocks on client response -- DoS risk." },
+        },
+    },
+    ServerStorage = {
+        desc = "Server-only storage. Should never be reachable by the client. Presence of a Remote here is a critical misconfiguration.",
+        methods = {
+            { m = "FindFirstChild",     risk = "HIGH", d = "If accessible from client: server-only boundary broken." },
+            { m = "GetDescendants",     risk = "HIGH", d = "Full server asset enumeration if accessible." },
+            { m = ":ChildAdded event",  risk = "MED",  d = "Monitor for runtime asset injection." },
+        },
+    },
+    ServerScriptService = {
+        desc = "Container for server Scripts. Client should never reach this. If accessible it means sandbox escaping has occurred.",
+        methods = {
+            { m = "FindFirstChild",     risk = "HIGH", d = "Script enumeration. Critical if client-reachable." },
+            { m = "GetDescendants",     risk = "HIGH", d = "Full server script listing -- extreme information leak." },
+        },
+    },
+    MessagingService = {
+        desc = "Cross-server broadcast channel. Data arriving here is assumed trusted by receiving servers. Fleet-wide poisoning vector.",
+        methods = {
+            { m = "PublishAsync",       risk = "HIGH", d = "Broadcast to all servers. If client influences payload: fleet-wide RCE." },
+            { m = "SubscribeAsync",     risk = "HIGH", d = "Receiving handler. If it feeds loadstring/DataStore without re-validation: critical sink." },
+        },
+    },
+    DataStoreService = {
+        desc = "Persistent key-value storage. Writing attacker-controlled data here achieves persistence across server restarts.",
+        methods = {
+            { m = "GetDataStore",       risk = "MED",  d = "Open a named store. Name could be client-influenced." },
+            { m = "SetAsync",           risk = "HIGH", d = "Write persistent data. If payload is client-controlled: persistent RCE state." },
+            { m = "GetAsync",           risk = "MED",  d = "Read persistent data. If result is eval'd: deserialization sink." },
+            { m = "UpdateAsync",        risk = "HIGH", d = "Atomic read-modify-write. Race condition if not guarded." },
+            { m = "RemoveAsync",        risk = "MED",  d = "Delete a key. If key is client-supplied: data destruction." },
+        },
+    },
+    MemoryStoreService = {
+        desc = "Fast temporary cross-server memory. Lower persistence than DataStore but higher throughput. Poisoning propagates fleet-wide instantly.",
+        methods = {
+            { m = "GetSortedMap",       risk = "MED",  d = "Open a sorted map store." },
+            { m = "SetAsync",           risk = "HIGH", d = "Fast cross-server write. Client-influenced data propagates instantly." },
+            { m = "GetAsync",           risk = "MED",  d = "Read fast store. If result is eval'd: deserialization sink." },
+        },
+    },
+    HttpService = {
+        desc = "External HTTP requests. If a client can influence the URL or body, data exfiltration or SSRF becomes possible.",
+        methods = {
+            { m = "GetAsync",           risk = "HIGH", d = "Outbound GET. If URL is client-supplied: SSRF / data exfil." },
+            { m = "PostAsync",          risk = "HIGH", d = "Outbound POST. If body is client-supplied: data exfil / webhook abuse." },
+            { m = "RequestAsync",       risk = "HIGH", d = "Full HTTP control. Most dangerous if client-influenced." },
+            { m = "JSONDecode",         risk = "MED",  d = "Parse JSON. Malformed input can crash or produce unexpected types." },
+        },
+    },
+    MarketplaceService = {
+        desc = "Purchases and game passes. Economy manipulation target. If purchase verification is client-side, items can be obtained without payment.",
+        methods = {
+            { m = "PromptPurchase",     risk = "MED",  d = "Trigger purchase UI. Client-callable. Cannot grant items alone." },
+            { m = "UserOwnsGamePassAsync", risk="HIGH", d = "Verify game pass ownership. If result trusted without server check: bypass." },
+            { m = "ProcessReceipt",     risk = "HIGH", d = "Server purchase callback. Duplicate processing = item duplication." },
+        },
+    },
+    TeleportService = {
+        desc = "Player teleportation. If destination is client-supplied, players can be sent to arbitrary places or servers.",
+        methods = {
+            { m = "Teleport",           risk = "HIGH", d = "Teleport to PlaceId. If ID is client-supplied: arbitrary place redirect." },
+            { m = "TeleportToPrivateServer", risk="HIGH", d = "Private server teleport. Abuse for session isolation attacks." },
+            { m = "TeleportPartyAsync", risk = "MED",  d = "Group teleport. Potential for mass redirect abuse." },
+        },
+    },
+    InsertService = {
+        desc = "Runtime asset insertion. Loading an attacker-controlled AssetId is equivalent to remote code execution.",
+        methods = {
+            { m = "LoadAsset",          risk = "HIGH", d = "Load asset by ID. Client-supplied AssetId = arbitrary asset injection." },
+            { m = "LoadAssetVersion",   risk = "HIGH", d = "Load specific version. Same risk as LoadAsset." },
+        },
+    },
+}
+
+-- Fallback entry for services without a catalogue entry
+local SERVICE_DETAIL_DEFAULT = {
+    desc = "No detailed security catalogue available for this service. Review its API for methods that accept client-influenced arguments.",
+    methods = {
+        { m = "Review API manually", risk = "MED", d = "Check for methods that accept strings, numbers, or tables from client sources." },
+    },
+}
+
+-- Risk colours
+local RISK_COL = {
+    HIGH = Color3.fromRGB(228, 60,  80),
+    MED  = Color3.fromRGB(220, 175, 50),
+    LOW  = Color3.fromRGB( 90, 180, 255),
+}
+
+local function openServiceDetailPanel(serviceName, anchorMenu, canvas)
+    closeServiceDetail()
+    if not anchorMenu or not canvas then return end
+
+    local detail = SERVICE_DETAILS[serviceName] or SERVICE_DETAIL_DEFAULT
+    local methods = detail.methods
+    local ROW_H  = 36
+    local HDR_H  = 52
+    local FOOT_H = 8
+    local DET_W  = 230
+    local MAX_VIS = 6
+    local visRows = math.min(#methods, MAX_VIS)
+    local rowAreaH = visRows * ROW_H
+    local totalH = HDR_H + rowAreaH + FOOT_H
+
+    -- Position: to the right of anchor menu, clamped to canvas
+    local ax = anchorMenu.Position.X.Offset + anchorMenu.AbsoluteSize.X + 6
+    local ay = anchorMenu.Position.Y.Offset
+    ax = math.min(ax, canvas.AbsoluteSize.X - DET_W - 4)
+    ay = math.min(ay, canvas.AbsoluteSize.Y - totalH - 4)
+    ax = math.max(ax, 2)
+    ay = math.max(ay, 2)
+
+    -- Panel shell
+    local panel = Instance.new("Frame")
+    panel.Name                   = "ServiceDetailPanel"
+    panel.Size                   = UDim2.fromOffset(DET_W, totalH)
+    panel.Position               = UDim2.fromOffset(ax, ay)
+    panel.BackgroundColor3       = Color3.fromRGB(10, 12, 22)
+    panel.BackgroundTransparency = 0.10
+    panel.BorderSizePixel        = 0
+    panel.ZIndex                 = 50
+    panel.ClipsDescendants       = false
+    panel.Parent                 = canvas
+
+    local function pc(r,g,b) return Color3.fromRGB(r,g,b) end
+    local BORDER = pc(80,110,200)
+    local TEXT   = pc(220,228,248)
+    local DIM    = pc(110,125,165)
+
+    local cornerP = Instance.new("UICorner")
+    cornerP.CornerRadius = UDim.new(0, 8)
+    cornerP.Parent = panel
+
+    local strokeP = Instance.new("UIStroke")
+    strokeP.Color = BORDER
+    strokeP.Transparency = 0.35
+    strokeP.Thickness = 1
+    strokeP.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    strokeP.Parent = panel
+
+    ctxDetail = panel
+
+    -- Connector line (visual bridge to the context menu)
+    local connector = Instance.new("Frame")
+    connector.Size = UDim2.fromOffset(8, 2)
+    connector.Position = UDim2.fromOffset(ax - 8, ay + HDR_H / 2)
+    connector.BackgroundColor3 = BORDER
+    connector.BackgroundTransparency = 0.55
+    connector.BorderSizePixel = 0
+    connector.ZIndex = 49
+    connector.Parent = canvas
+
+    -- Header
+    local hdr = Instance.new("Frame")
+    hdr.Size = UDim2.fromOffset(DET_W, HDR_H)
+    hdr.Position = UDim2.fromOffset(0, 0)
+    hdr.BackgroundColor3 = pc(14, 18, 32)
+    hdr.BackgroundTransparency = 0.10
+    hdr.BorderSizePixel = 0
+    hdr.ZIndex = 51
+    hdr.Parent = panel
+
+    local hdrCorner = Instance.new("UICorner")
+    hdrCorner.CornerRadius = UDim.new(0, 8)
+    hdrCorner.Parent = hdr
+
+    -- Accent left stripe
+    local stripe = Instance.new("Frame")
+    stripe.Size = UDim2.fromOffset(3, HDR_H)
+    stripe.Position = UDim2.fromOffset(0, 0)
+    stripe.BackgroundColor3 = BORDER
+    stripe.BackgroundTransparency = 0.0
+    stripe.BorderSizePixel = 0
+    stripe.ZIndex = 52
+    stripe.Parent = hdr
+
+    local stripeCorner = Instance.new("UICorner")
+    stripeCorner.CornerRadius = UDim.new(0, 2)
+    stripeCorner.Parent = stripe
+
+    -- Service name
+    local nameL = Instance.new("TextLabel")
+    nameL.Size = UDim2.fromOffset(DET_W - 30, 18)
+    nameL.Position = UDim2.fromOffset(10, 4)
+    nameL.BackgroundTransparency = 1
+    nameL.Text = serviceName
+    nameL.TextSize = 10
+    nameL.Font = Enum.Font.GothamBold
+    nameL.TextColor3 = TEXT
+    nameL.TextXAlignment = Enum.TextXAlignment.Left
+    nameL.TextYAlignment = Enum.TextYAlignment.Center
+    nameL.BorderSizePixel = 0
+    nameL.ZIndex = 52
+    nameL.Parent = hdr
+
+    -- Close button
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(16, 16)
+    closeBtn.Position = UDim2.fromOffset(DET_W - 20, 6)
+    closeBtn.BackgroundColor3 = pc(180, 40, 40)
+    closeBtn.BackgroundTransparency = 0.55
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "x"
+    closeBtn.TextSize = 8
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextColor3 = TEXT
+    closeBtn.ZIndex = 52
+    closeBtn.Parent = hdr
+
+    local closeBtnCorner = Instance.new("UICorner")
+    closeBtnCorner.CornerRadius = UDim.new(0, 3)
+    closeBtnCorner.Parent = closeBtn
+    closeBtn.MouseButton1Click:Connect(closeServiceDetail)
+
+    -- Description
+    local descL = Instance.new("TextLabel")
+    descL.Size = UDim2.fromOffset(DET_W - 14, HDR_H - 26)
+    descL.Position = UDim2.fromOffset(10, 24)
+    descL.BackgroundTransparency = 1
+    descL.Text = detail.desc:sub(1, 120)
+    descL.TextSize = 7
+    descL.Font = Enum.Font.Gotham
+    descL.TextColor3 = DIM
+    descL.TextWrapped = true
+    descL.TextXAlignment = Enum.TextXAlignment.Left
+    descL.TextYAlignment = Enum.TextYAlignment.Top
+    descL.BorderSizePixel = 0
+    descL.ZIndex = 52
+    descL.Parent = hdr
+
+    -- Methods scroll area
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.fromOffset(DET_W, rowAreaH)
+    scroll.Position = UDim2.fromOffset(0, HDR_H)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = (#methods > MAX_VIS) and 3 or 0
+    scroll.ScrollBarImageColor3 = BORDER
+    scroll.ScrollBarImageTransparency = 0.40
+    scroll.CanvasSize = UDim2.fromOffset(DET_W, #methods * ROW_H)
+    scroll.ZIndex = 51
+    scroll.Parent = panel
+
+    local ll = Instance.new("UIListLayout")
+    ll.SortOrder = Enum.SortOrder.LayoutOrder
+    ll.Padding = UDim.new(0, 1)
+    ll.Parent = scroll
+
+    for i, m in ipairs(methods) do
+        local riskCol = RISK_COL[m.risk] or DIM
+
+        local row = Instance.new("Frame")
+        row.Size = UDim2.fromOffset(DET_W, ROW_H)
+        row.BackgroundColor3 = pc(16, 20, 36)
+        row.BackgroundTransparency = 0.45
+        row.BorderSizePixel = 0
+        row.LayoutOrder = i
+        row.ZIndex = 52
+        row.Parent = scroll
+
+        -- Risk stripe
+        local rStripe = Instance.new("Frame")
+        rStripe.Size = UDim2.fromOffset(3, ROW_H)
+        rStripe.Position = UDim2.fromOffset(0, 0)
+        rStripe.BackgroundColor3 = riskCol
+        rStripe.BackgroundTransparency = 0.30
+        rStripe.BorderSizePixel = 0
+        rStripe.ZIndex = 53
+        rStripe.Parent = row
+
+        -- Risk badge
+        local badge = Instance.new("Frame")
+        badge.Size = UDim2.fromOffset(28, 13)
+        badge.Position = UDim2.fromOffset(8, 4)
+        badge.BackgroundColor3 = riskCol
+        badge.BackgroundTransparency = 0.65
+        badge.BorderSizePixel = 0
+        badge.ZIndex = 53
+        badge.Parent = row
+
+        local badgeCorner = Instance.new("UICorner")
+        badgeCorner.CornerRadius = UDim.new(0, 3)
+        badgeCorner.Parent = badge
+
+        local badgeLbl = Instance.new("TextLabel")
+        badgeLbl.Size = UDim2.fromOffset(28, 13)
+        badgeLbl.BackgroundTransparency = 1
+        badgeLbl.Text = m.risk
+        badgeLbl.TextSize = 6
+        badgeLbl.Font = Enum.Font.GothamBold
+        badgeLbl.TextColor3 = riskCol
+        badgeLbl.TextXAlignment = Enum.TextXAlignment.Center
+        badgeLbl.BorderSizePixel = 0
+        badgeLbl.ZIndex = 54
+        badgeLbl.Parent = badge
+
+        -- Method name
+        local mLabel = Instance.new("TextLabel")
+        mLabel.Size = UDim2.fromOffset(DET_W - 50, 14)
+        mLabel.Position = UDim2.fromOffset(40, 2)
+        mLabel.BackgroundTransparency = 1
+        mLabel.Text = m.m
+        mLabel.TextSize = 8
+        mLabel.Font = Enum.Font.GothamBold
+        mLabel.TextColor3 = TEXT
+        mLabel.TextXAlignment = Enum.TextXAlignment.Left
+        mLabel.TextTruncate = Enum.TextTruncate.AtEnd
+        mLabel.BorderSizePixel = 0
+        mLabel.ZIndex = 53
+        mLabel.Parent = row
+
+        -- Description
+        local dLabel = Instance.new("TextLabel")
+        dLabel.Size = UDim2.fromOffset(DET_W - 12, ROW_H - 18)
+        dLabel.Position = UDim2.fromOffset(8, 18)
+        dLabel.BackgroundTransparency = 1
+        dLabel.Text = m.d:sub(1, 80)
+        dLabel.TextSize = 7
+        dLabel.Font = Enum.Font.Gotham
+        dLabel.TextColor3 = DIM
+        dLabel.TextXAlignment = Enum.TextXAlignment.Left
+        dLabel.TextWrapped = true
+        dLabel.BorderSizePixel = 0
+        dLabel.ZIndex = 53
+        dLabel.Parent = row
+
+        -- Hover
+        row.MouseEnter:Connect(function()
+            TweenService:Create(row, TweenInfo.new(0.08),
+                { BackgroundTransparency = 0.20 }):Play()
+        end)
+        row.MouseLeave:Connect(function()
+            TweenService:Create(row, TweenInfo.new(0.08),
+                { BackgroundTransparency = 0.45 }):Play()
+        end)
     end
 end
 
@@ -2354,6 +2736,10 @@ local function openCtxMenu(node, canvasPos)
             refreshWires()
             local pos = menu.Position
             openCtxMenu(node, Vector2.new(pos.X.Offset, pos.Y.Offset))
+            -- Open the service detail panel for SERVICE nodes
+            if isService and graphCanvas then
+                openServiceDetailPanel(capturedAct.n, ctxMenu, graphCanvas)
+            end
         end)
     end
 
