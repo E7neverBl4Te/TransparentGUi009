@@ -858,6 +858,9 @@ local ctxNode       = nil  -- node the context menu belongs to
 local selectedNode  = nil  -- currently selected node
 local wiringFrom    = nil  -- node being wired from (output port clicked)
 local traceLastPlaced = {}  -- stageId -> node, from the most recent trace
+-- Forward declarations for service detail panel (defined later, used in closeCtx)
+local ctxDetail          = nil
+local closeServiceDetail = nil  -- assigned below when the function is defined
 
 local NODE_W  = 130
 local NODE_H  = 60
@@ -2125,9 +2128,9 @@ end
 -- Shows security-relevant methods for the selected service, their risk level,
 -- and lets the user pick a specific operation to track in the chain.
 
-local ctxDetail = nil   -- active detail panel Frame or nil
-
-local function closeServiceDetail()
+-- closeServiceDetail and ctxDetail are forward-declared near ctxMenu above.
+-- Assign the function body here so closeCtx (defined between the two) can call it.
+closeServiceDetail = function()
     if ctxDetail then ctxDetail:Destroy() ctxDetail = nil end
 end
 
