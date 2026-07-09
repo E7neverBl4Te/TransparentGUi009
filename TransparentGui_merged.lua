@@ -10582,12 +10582,489 @@ function DAL:scanRacePreconditions()
 end
 
 -- ══════════════════════════════════════════════════════════════════
+--   LEVERAGE ENGINE
+--
+--   Purpose: turn a raw violation into an actionable roadmap toward
+--   SB-RCE. When DAL finds something, it doesn't stop at "this is
+--   broken." It asks: what does this broken thing actually unlock?
+--   What's the next concrete step from this specific finding toward
+--   obtaining Sandbox Remote Code Execution?
+--
+--   Architecture:
+--     1. STATIC PRE-SCANNER   — reads each remote before touching it.
+--                               Scores name patterns against known
+--                               execution-sink keywords, identity-drop
+--                               patterns, and broadcast-ingress markers.
+--                               This is the "direct way to find bugs"
+--                               without blind fuzzing.
+--
+--     2. LEVERAGE RESOLVER    — given a violation type + remote context,
+--                               produces a structured LeveragePlan:
+--                               { step, technique, payload, nodeType,
+--                                 rceProximity, rationale }
+--
+--     3. LEVERAGE LOG         — ordered list of plans (newest first),
+--                               surfaced in the LEVERAGE tab of the UI.
+--
+--     4. APPLY TO NODE        — pushes a LeveragePlan into the S->S
+--                               graph as a real node so the finding
+--                               becomes part of the attack chain.
+-- ══════════════════════════════════════════════════════════════════
+
+-- ── RCE Proximity scale ───────────────────────────────────────────
+-- How many confirmed steps away from SB-RCE is this finding?
+-- 1 = direct execution boundary confirmed
+-- 2 = one hop away (e.g. identity loss into an exec-capable system)
+-- 3 = structural precondition only (race, ingress map)
+local RCE_PROX = {
+    DIRECT      = 1,
+    ONE_HOP     = 2,
+    STRUCTURAL  = 3,
+}
+
+-- ── Leverage Plan schema ──────────────────────────────────────────
+-- Every plan produced by the engine has this shape:
+-- {
+--   id          : string           unique plan ID
+--   timestamp   : number
+--   remotePath  : string
+--   vtype       : VTYPE.*
+--   severity    : SEV.*
+--   rceProximity: RCE_PROX.*      (1=closest, 3=structural)
+--   technique   : string           one-line technique name
+--   rationale   : string           why this works / what it proves
+--   steps       : { string, ... }  ordered action steps for the user
+--   payload     : string           concrete payload string to try next
+--   nodeType    : string           node type to add to S->S graph
+--   nodeLabel   : string           label for that node
+--   applied     : boolean          has user applied this to their graph?
+-- }
+
+local LE = {
+    plans    = {},
+    MAX_PLANS = 100,
+    onPlan   = nil,   -- UI callback
+}
+
+local _planSeq = 0
+local function newPlanId()
+    _planSeq = _planSeq + 1
+    return string.format("LP-%04d", _planSeq)
+end
+
+-- ── Static Pre-Scanner ───────────────────────────────────────────
+-- Scores a remote before any fuzzing happens. Returns a pre-scan
+-- record with risk signals that guide which probes to run first.
+
+local PRE_SCAN_EXEC_SINKS = {
+    -- Direct execution sinks (highest priority)
+    { kw="loadstring",  weight=10, signal="loadstring-sink"   },
+    { kw="require",     weight=8,  signal="require-sink"      },
+    { kw="getfenv",     weight=9,  signal="getfenv-sink"      },
+    { kw="exec",        weight=7,  signal="exec-pattern"      },
+    { kw="eval",        weight=7,  signal="eval-pattern"      },
+    { kw="run",         weight=5,  signal="run-pattern"       },
+    { kw="compile",     weight=6,  signal="compile-pattern"   },
+    { kw="interpret",   weight=6,  signal="interpret-pattern" },
+    { kw="script",      weight=5,  signal="script-pattern"    },
+    -- Identity / trust boundary
+    { kw="admin",       weight=8,  signal="admin-boundary"    },
+    { kw="auth",        weight=7,  signal="auth-boundary"     },
+    { kw="verify",      weight=6,  signal="verify-boundary"   },
+    { kw="trust",       weight=6,  signal="trust-boundary"    },
+    { kw="permission",  weight=5,  signal="permission-boundary"},
+    { kw="rank",        weight=5,  signal="rank-boundary"     },
+    -- Economy / state change
+    { kw="buy",         weight=4,  signal="economy-state"     },
+    { kw="sell",        weight=4,  signal="economy-state"     },
+    { kw="trade",       weight=5,  signal="economy-state"     },
+    { kw="transfer",    weight=5,  signal="economy-state"     },
+    { kw="give",        weight=4,  signal="economy-state"     },
+    -- Broadcast / fleet
+    { kw="broadcast",   weight=7,  signal="fleet-ingress"     },
+    { kw="publish",     weight=7,  signal="fleet-ingress"     },
+    { kw="fleet",       weight=8,  signal="fleet-ingress"     },
+    { kw="global",      weight=6,  signal="fleet-ingress"     },
+    { kw="announce",    weight=5,  signal="fleet-ingress"     },
+    -- Bindable identity drop patterns
+    { kw="relay",       weight=6,  signal="bindable-relay"    },
+    { kw="dispatch",    weight=6,  signal="bindable-relay"    },
+    { kw="forward",     weight=5,  signal="bindable-relay"    },
+    { kw="route",       weight=5,  signal="bindable-relay"    },
+    { kw="handler",     weight=4,  signal="bindable-relay"    },
+}
+
+function LE:preScan(remotePath, rec)
+    local name  = rec.inst.Name
+    local lower = name:lower()
+    local totalScore = 0
+    local signals = {}
+
+    for _, entry in ipairs(PRE_SCAN_EXEC_SINKS) do
+        if lower:find(entry.kw, 1, true) then
+            totalScore = totalScore + entry.weight
+            table.insert(signals, entry.signal)
+        end
+    end
+
+    -- Classify the dominant risk tier
+    local tier
+    if totalScore >= 15 then
+        tier = "EXEC_SINK"       -- probable execution boundary
+    elseif totalScore >= 10 then
+        tier = "TRUST_BOUNDARY"  -- admin/auth/identity
+    elseif totalScore >= 6 then
+        tier = "FLEET_RISK"      -- broadcast/relay
+    elseif totalScore >= 3 then
+        tier = "STATE_RISK"      -- economy/state mutation
+    else
+        tier = "UNKNOWN"
+    end
+
+    return {
+        path      = remotePath,
+        name      = name,
+        score     = totalScore,
+        tier      = tier,
+        signals   = signals,
+        preScanTs = tick(),
+    }
+end
+
+-- Sort discovered remotes by pre-scan score (highest risk first)
+function LE:rankRemotes()
+    local ranked = {}
+    for path, rec in pairs(DAL.discovered) do
+        local ps = self:preScan(path, rec)
+        table.insert(ranked, ps)
+    end
+    table.sort(ranked, function(a, b) return a.score > b.score end)
+    return ranked
+end
+
+-- ── Leverage Resolver ────────────────────────────────────────────
+-- Given a violation, produce a concrete LeveragePlan.
+-- This is the core of the engine — each branch maps a violation
+-- type to a specific technique, payload, node type, and step list.
+
+local LEVERAGE_RULES = {
+
+    [VTYPE.RCE_BOUNDARY] = function(v, preScan)
+        return {
+            technique    = "Execution Sink Injection",
+            rceProximity = RCE_PROX.DIRECT,
+            nodeType     = "EXEC_SINK",
+            nodeLabel    = "⚡ " .. (preScan and preScan.name or "RCE Target"),
+            rationale    = "Server echoed an execution signature or this remote's name " ..
+                           "directly matches a known exec sink. The data→instruction " ..
+                           "boundary has been located. This is the ledge.",
+            steps = {
+                "1. Add this remote as an EXEC_SINK node in your S->S graph.",
+                "2. Confirm the server evaluates string payloads by sending: " ..
+                   "tostring(type(getfenv())) — if it echoes back 'function', execution confirmed.",
+                "3. Escalate to an environment dump probe: " ..
+                   "send a payload that reads game.PlaceId from getfenv() and checks for echo.",
+                "4. If execution confirmed: inject a persistent listener using a " ..
+                   "BindableEvent as a command relay so you can issue further instructions " ..
+                   "without re-firing the remote each time.",
+                "5. Mark this chain CRITICAL in the Custody Ledger — identity here is server.",
+            },
+            payload = "tostring(type(getfenv and getfenv() or load))",
+        }
+    end,
+
+    [VTYPE.IDENTITY_LOSS] = function(v, preScan)
+        return {
+            technique    = "UserId Substitution via Bindable Drop",
+            rceProximity = RCE_PROX.ONE_HOP,
+            nodeType     = "IDENTITY_SPOOF",
+            nodeLabel    = "👤 Identity Drop — " .. (preScan and preScan.name or v.remotePath),
+            rationale    = "This remote passes data to a downstream Bindable without " ..
+                           "preserving the Player object. The receiving script identifies " ..
+                           "the caller by a client-supplied value — which you control.",
+            steps = {
+                "1. Add this remote as an IDENTITY_DROP node in your S->S graph.",
+                "2. Fire the remote with UserId = 1 (Roblox admin) as the identity argument.",
+                "3. Observe whether the downstream action is applied to a different player " ..
+                   "or grants elevated permissions.",
+                "4. If confirmed: chain this into a SESSION_CACHE write — " ..
+                   "poison the cache key that the admin-check system reads.",
+                "5. From there, any remote that trusts that cache key now treats you as admin.",
+                "6. Leverage admin status to locate a loadstring or require sink " ..
+                   "that is gated behind the admin check you just bypassed.",
+            },
+            payload = "{ UserId = 1, Name = 'Roblox', Role = 'admin' }",
+        }
+    end,
+
+    [VTYPE.SILENT_PROCESS] = function(v, preScan)
+        local tier = preScan and preScan.tier or "UNKNOWN"
+        local isHighValue = (tier == "EXEC_SINK" or tier == "TRUST_BOUNDARY")
+        return {
+            technique    = isHighValue
+                and "Silent-Processing Exec Sink Escalation"
+                or  "Silent-Processing State Mutation",
+            rceProximity = isHighValue and RCE_PROX.ONE_HOP or RCE_PROX.STRUCTURAL,
+            nodeType     = "SILENT_SINK",
+            nodeLabel    = "🔇 Silent Sink — " .. (preScan and preScan.name or v.remotePath),
+            rationale    = "Server consumed malformed data without rejecting or erroring. " ..
+                           "This means validation is absent — the server is working with " ..
+                           "whatever you send. " .. (isHighValue
+                               and "Combined with this remote's exec-sink signals, " ..
+                                   "silent processing here means injected code may run silently."
+                               or  "The server's state can be corrupted without any " ..
+                                   "visible error telling the developer something is wrong."),
+            steps = {
+                "1. Add this remote as a SILENT_SINK node in your S->S graph.",
+                "2. Send progressively more dangerous payloads — start with type mismatches, " ..
+                   "escalate to environment probe strings.",
+                "3. Watch for any state change in Leaderstats, character, or attributes " ..
+                   "after each fire (DAL differential snapshot will catch this).",
+                "4. If the remote has exec-sink signals: send the RCE probe battery " ..
+                   "directly — silent acceptance means no error wall to stop it.",
+                "5. If state mutation confirmed: map which other systems read that state " ..
+                   "and whether any of them touch a loadstring or require path.",
+            },
+            payload = "{ __type = 'probe', __exec = 'return game.PlaceId', x = math.huge }",
+        }
+    end,
+
+    [VTYPE.DOUBLE_INGRESS] = function(v, preScan)
+        return {
+            technique    = "Fleet-Wide Broadcast Poisoning via Double Ingress",
+            rceProximity = RCE_PROX.ONE_HOP,
+            nodeType     = "FLEET_INGRESS",
+            nodeLabel    = "📡 Fleet Ingress — " .. (preScan and preScan.name or v.remotePath),
+            rationale    = "This remote feeds data into a MessagingService:PublishAsync " ..
+                           "path. Any server in the fleet that subscribes and blindly " ..
+                           "processes the incoming message will execute your payload. " ..
+                           "One injection, every server.",
+            steps = {
+                "1. Add this remote as a FLEET_INGRESS node in your S->S graph.",
+                "2. Confirm the double-ingress chain: fire this remote with a sentinel " ..
+                   "value and watch whether other connected servers receive it via C2 log.",
+                "3. Craft a poisoned payload targeting the receiving server's " ..
+                   "SubscribeAsync handler — look for Instance.new, DataStore writes, " ..
+                   "or eval-style functions in the handler logic.",
+                "4. If the handler does Instance.new(payload): send 'Script' as payload " ..
+                   "to instantiate a bare server script.",
+                "5. Achieving fleet-wide execution from a single client fire is the " ..
+                   "highest-impact outcome — log this chain immediately in Custody Ledger.",
+            },
+            payload = "{ __fleet_probe = true, __sentinel = 'DAL_FW_7f3a', data = '' }",
+        }
+    end,
+
+    [VTYPE.RACE_PRECOND] = function(v, preScan)
+        return {
+            technique    = "Concurrent State Corruption (Race Condition)",
+            rceProximity = RCE_PROX.STRUCTURAL,
+            nodeType     = "RACE_TARGET",
+            nodeLabel    = "⚡ Race — " .. (preScan and preScan.name or v.remotePath),
+            rationale    = "This remote touches an economy or state value without a " ..
+                           "confirmed debounce or mutex. Rapid concurrent fires can pass " ..
+                           "the 'do they have enough?' check multiple times before the " ..
+                           "first deduction is committed.",
+            steps = {
+                "1. Add this remote as a RACE_TARGET node in your S->S graph.",
+                "2. Fire this remote 50-200 times in rapid succession using a tight loop.",
+                "3. Observe whether the server processes more than one request before " ..
+                   "the state is updated (check Leaderstats in DAL snapshot diff).",
+                "4. If race confirmed: use the duplicated state to accumulate resources " ..
+                   "that can then be spent on a higher-privilege action.",
+                "5. Chain: race-duplicated currency → buy admin item → " ..
+                   "admin item triggers loadstring path → SB-RCE.",
+            },
+            payload = "-- Fire 100x in loop: remote:FireServer(itemId)",
+        }
+    end,
+
+    [VTYPE.LOGIC_BYPASS] = function(v, preScan)
+        return {
+            technique    = "Assumption Violation — Logic Bypass",
+            rceProximity = RCE_PROX.STRUCTURAL,
+            nodeType     = "BYPASS_POINT",
+            nodeLabel    = "🚪 Bypass — " .. (preScan and preScan.name or v.remotePath),
+            rationale    = "The server is making a trust-based decision about this input " ..
+                           "rather than a validation-based one. The developer assumed " ..
+                           "something about what the client would send — you violated that.",
+            steps = {
+                "1. Add this remote as a BYPASS_POINT node in your S->S graph.",
+                "2. Identify the specific assumption being violated " ..
+                   "(type, range, context, timing).",
+                "3. Escalate the violation: if a string bypass works, try a table; " ..
+                   "if a number bypass works, try math.huge or NaN.",
+                "4. Map where the bypassed value flows next — does it reach a " ..
+                   "loadstring, require, or getfenv path downstream?",
+                "5. If yes: you have a full Source→Bypass→Sink chain. " ..
+                   "Apply all three nodes to the S->S graph and run EXECUTE.",
+            },
+            payload = v.payload or "math.huge",
+        }
+    end,
+
+    [VTYPE.STATE_SPOOF] = function(v, preScan)
+        return {
+            technique    = "Differential State Mutation",
+            rceProximity = RCE_PROX.STRUCTURAL,
+            nodeType     = "STATE_SINK",
+            nodeLabel    = "📊 State Sink — " .. (preScan and preScan.name or v.remotePath),
+            rationale    = "A malformed payload caused unexpected server state to change. " ..
+                           "The server is not isolating the effects of this remote. " ..
+                           "Data intended for one system is bleeding into another.",
+            steps = {
+                "1. Add this remote as a STATE_SINK node in your S->S graph.",
+                "2. Identify exactly which state changed (DAL snapshot diff shows this).",
+                "3. Determine whether the mutated state is read by a security-sensitive " ..
+                   "system (admin check, anti-cheat, DataStore write).",
+                "4. If yes: this is a Lateral Transport Trust hole — " ..
+                   "poison this state deliberately with an identity or permission value.",
+                "5. Chain into identity loss: mutated state → admin check reads it → " ..
+                   "you are treated as admin → exec sink access.",
+            },
+            payload = v.payload or "{ spoofed = true, role = 'admin', uid = 1 }",
+        }
+    end,
+}
+
+-- Fallback rule for violation types without a specific resolver
+local function defaultLeverageRule(v, preScan)
+    return {
+        technique    = "General Assumption Violation",
+        rceProximity = RCE_PROX.STRUCTURAL,
+        nodeType     = "GENERIC_FINDING",
+        nodeLabel    = "⚠ Finding — " .. (preScan and preScan.name or v.remotePath),
+        rationale    = "A structural flaw was detected. " ..
+                       "Map its downstream flow to determine exploit potential.",
+        steps = {
+            "1. Add this remote to your S->S graph.",
+            "2. Trace where its output flows — look for exec sinks downstream.",
+            "3. Escalate probing on this remote with the RCE probe battery.",
+        },
+        payload = "—",
+    }
+end
+
+-- ── Main resolve function ─────────────────────────────────────────
+function LE:resolve(violation)
+    local ruleFn = LEVERAGE_RULES[violation.vtype] or defaultLeverageRule
+
+    -- Get pre-scan data if we have it for this remote
+    local rec     = DAL.discovered[violation.remotePath]
+    local preScan = rec and self:preScan(violation.remotePath, rec) or nil
+
+    local plan    = ruleFn(violation, preScan)
+
+    plan.id          = newPlanId()
+    plan.timestamp   = tick()
+    plan.remotePath  = violation.remotePath
+    plan.vtype       = violation.vtype
+    plan.severity    = violation.severity
+    plan.applied     = false
+    plan.preScan     = preScan
+
+    table.insert(self.plans, 1, plan)
+    if #self.plans > self.MAX_PLANS then table.remove(self.plans) end
+
+    -- Push to DALSink
+    DALSink:push({
+        type      = "LEVERAGE",
+        planId    = plan.id,
+        technique = plan.technique,
+        path      = plan.remotePath,
+        prox      = plan.rceProximity,
+    })
+
+    if self.onPlan then self.onPlan(plan) end
+    return plan
+end
+
+-- Auto-resolve every new violation as it comes in
+-- Wire this up after DAL.onViolation is set
+local _prevOnViolLE = DAL.onViolation
+DAL.onViolation = function(v)
+    if _prevOnViolLE then _prevOnViolLE(v) end
+    if v then LE:resolve(v) end
+end
+
+-- ── Apply to Node ─────────────────────────────────────────────────
+-- Pushes a LeveragePlan into the S->S graph as a real node.
+-- Reads the existing ssCtx node table and inserts a new entry.
+function LE:applyToNode(plan)
+    if plan.applied then return false, "Already applied" end
+
+    -- ssCtx is defined in the main script scope. We reach it through
+    -- the shared upvalue since DAL runs in the same chunk closure.
+    if not ssCtx or not ssCtx.nodes then
+        return false, "S->S graph context not available"
+    end
+
+    local nodeId = "dal_" .. plan.id:lower():gsub("-", "_")
+    local newNode = {
+        id       = nodeId,
+        label    = plan.nodeLabel,
+        kind     = plan.nodeType,
+        x        = 80 + (#ssCtx.nodes * 22) % 400,
+        y        = 60 + math.floor(#ssCtx.nodes / 18) * 60,
+        dalPlan  = plan.id,
+        note     = plan.technique,
+    }
+
+    table.insert(ssCtx.nodes, newNode)
+    plan.applied = true
+
+    DALSink:push({
+        type    = "NODE_APPLIED",
+        planId  = plan.id,
+        nodeId  = nodeId,
+        label   = plan.nodeLabel,
+    })
+
+    if self.onPlan then self.onPlan(plan) end
+    return true, nodeId
+end
+
+-- ── Ranked scan shortcut ──────────────────────────────────────────
+-- Run the pre-scanner across all discovered remotes, auto-generate
+-- a leverage plan for every high-score remote without waiting for
+-- fuzzing to produce a violation first.
+function LE:scanAndResolveAll()
+    local ranked = self:rankRemotes()
+    local count  = 0
+    for _, ps in ipairs(ranked) do
+        if ps.score >= 6 then  -- only surface meaningful signals
+            -- Synthesize a lightweight violation record from pre-scan
+            local syntheticV = {
+                id         = "prescan_" .. ps.path,
+                timestamp  = tick(),
+                vtype      = (ps.tier == "EXEC_SINK"     and VTYPE.RCE_BOUNDARY)
+                          or (ps.tier == "TRUST_BOUNDARY" and VTYPE.IDENTITY_LOSS)
+                          or (ps.tier == "FLEET_RISK"     and VTYPE.DOUBLE_INGRESS)
+                          or VTYPE.LOGIC_BYPASS,
+                severity   = (ps.score >= 15 and SEV.CRITICAL)
+                          or (ps.score >= 10 and SEV.HIGH)
+                          or SEV.MEDIUM,
+                remotePath = ps.path,
+                payload    = "static:pre-scan",
+                evidence   = "Pre-scan score " .. ps.score ..
+                             " — signals: " .. table.concat(ps.signals, ", "),
+                traceId    = "PRESCAN",
+                mode       = DAL.mode,
+            }
+            self:resolve(syntheticV)
+            count = count + 1
+        end
+    end
+    return count, ranked
+end
+
+-- ══════════════════════════════════════════════════════════════════
 --   UI PANEL
 --   420 × 510 draggable panel with 4 tabs:
 --     [REMOTES]    — discovered remote list, per-remote fuzz button
 --     [VIOLATIONS] — live violation registry with severity colour coding
 --     [FUZZER]     — mutation library display, global fuzz controls
---     [DALSink LOG]     — raw DALSink sink stream
+--     [C2 LOG]     — raw DALSink sink stream
 -- ══════════════════════════════════════════════════════════════════
 local PANEL_W, PANEL_H = 420, 510
 local COL = {
@@ -10815,6 +11292,7 @@ end
 
 -- ── TAB 2 — VIOLATIONS ──────────────────────────────────────────────
 local function buildViolationsTab(violPage, PW, PH)
+    local ROW_H  = 68   -- taller rows to fit the LEVERAGE button
     local violScroll = mkScroll(violPage, 2, 2, PW - 4, PH - 4, 52)
 
     local function rebuildViolations()
@@ -10822,31 +11300,63 @@ local function buildViolationsTab(violPage, PW, PH)
             if c:IsA("Frame") then c:Destroy() end
         end
         for i, v in ipairs(DAL.violations) do
-            local row = mkFrame(violScroll, 0, 0, PW - 14, 52, COL.ROW, 0.30, 53)
+            local row = mkFrame(violScroll, 0, 0, PW - 14, ROW_H, COL.ROW, 0.30, 53)
             row.LayoutOrder = i
             uiCorner(row, 4)
 
-            local stripe = mkFrame(row, 0, 0, 3, 52, v.severity.col, 0.15, 54)
+            -- Severity stripe
+            local stripe = mkFrame(row, 0, 0, 3, ROW_H, v.severity.col, 0.15, 54)
             uiCorner(stripe, 2)
 
+            -- Severity badge
             mkSevBadge(row, 7, 5, v.severity)
 
-            mkLabel(row, 69, 3, PW - 150, 16, v.vtype, 8, COL.TEXT,
+            -- Violation type
+            mkLabel(row, 69, 3, PW - 230, 16, v.vtype, 8, COL.TEXT,
                 Enum.TextXAlignment.Left, 54)
 
-            mkLabel(row, PW - 80, 3, 60, 14,
+            -- Mode badge
+            mkLabel(row, PW - 155, 3, 50, 14,
                 "Mode " .. v.mode, 6, COL.DIM,
                 Enum.TextXAlignment.Right, 54)
 
+            -- Remote path
             mkLabel(row, 7, 21, PW - 20, 13,
                 "→ " .. v.remotePath, 7, COL.DIM,
                 Enum.TextXAlignment.Left, 54)
 
+            -- Evidence
             mkLabel(row, 7, 36, PW - 20, 13,
-                v.evidence:sub(1, 90), 7, Color3.fromRGB(160,175,210),
+                v.evidence:sub(1, 80), 7, Color3.fromRGB(160,175,210),
                 Enum.TextXAlignment.Left, 54)
+
+            -- ── LEVERAGE button ──────────────────────────────────
+            local leverageBtn = mkBtn(row, 7, ROW_H - 22, 110, 18,
+                "⬡ LEVERAGE ▸  S→S",
+                Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 55)
+
+            -- Apply-to-node shortcut button
+            local applyBtn = mkBtn(row, 122, ROW_H - 22, 90, 18,
+                "APPLY TO NODE",
+                Color3.fromRGB(40,160,80), Color3.fromRGB(40,160,80), 55)
+
+            local captV = v
+            leverageBtn.MouseButton1Click:Connect(function()
+                local report = DAL:getLeverageReport(captV)
+                showLeveragePanel(violPage.Parent, captV, report)
+            end)
+
+            applyBtn.MouseButton1Click:Connect(function()
+                applyBtn.Text = "…"
+                local report = DAL:getLeverageReport(captV)
+                local ok, result = DAL:applyToNode(report)
+                applyBtn.Text = ok and "✓ Added" or "✗ Failed"
+                task.delay(2, function()
+                    applyBtn.Text = "APPLY TO NODE"
+                end)
+            end)
         end
-        violScroll.CanvasSize = UDim2.fromOffset(0, #DAL.violations * 54)
+        violScroll.CanvasSize = UDim2.fromOffset(0, #DAL.violations * (ROW_H + 2))
     end
 
     local _prevOnViol = DAL.onViolation
@@ -11100,6 +11610,216 @@ local function buildAlertBanner(root, PW)
     return trigger
 end
 
+-- ── TAB 5 — LEVERAGE ────────────────────────────────────────────────
+local function buildLeverageTab(levPage, PW, PH, switchTab)
+    -- Header bar with PRE-SCAN and SCAN ALL buttons
+    local levBar = mkFrame(levPage, 0, 0, PW, 26, Color3.new(0,0,0), 1, 52)
+
+    local preScanBtn = mkBtn(levBar, 4, 4, 72, 18, "PRE-SCAN",
+        Color3.fromRGB(200, 40, 220), Color3.fromRGB(200, 40, 220), 53)
+    local scanAllBtn = mkBtn(levBar, 80, 4, 74, 18, "SCAN ALL",
+        Color3.fromRGB(228, 60, 80), Color3.fromRGB(228, 60, 80), 53)
+    local planCountLbl = mkLabel(levBar, PW - 80, 0, 74, 26,
+        "0 plans", 7, COL.DIM, Enum.TextXAlignment.Right, 53)
+
+    -- RCE proximity legend
+    local legFrame = mkFrame(levPage, 0, 26, PW, 18, Color3.new(0,0,0), 1, 52)
+    mkLabel(legFrame, 4, 0, 60, 18, "PROXIMITY:", 6, COL.DIM,
+        Enum.TextXAlignment.Left, 53)
+    local proxCols = {
+        [1] = { label="DIRECT",     col=Color3.fromRGB(200, 40,220) },
+        [2] = { label="ONE HOP",    col=Color3.fromRGB(228, 60, 80) },
+        [3] = { label="STRUCTURAL", col=Color3.fromRGB(220,175, 50) },
+    }
+    local lx = 70
+    for _, pd in ipairs(proxCols) do
+        local pb = mkFrame(legFrame, lx, 3, 68, 12, pd.col, 0.65, 53)
+        uiCorner(pb, 3)
+        mkLabel(pb, 0, 0, 68, 12, pd.label, 6, pd.col,
+            Enum.TextXAlignment.Center, 54)
+        lx = lx + 72
+    end
+
+    -- Plan scroll
+    local levScroll = mkScroll(levPage, 2, 44, PW - 4, PH - 46, 52)
+
+    local function rebuildLeverage()
+        for _, c in ipairs(levScroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+
+        planCountLbl.Text = #LE.plans .. " plan" ..
+            (#LE.plans == 1 and "" or "s")
+
+        for i, plan in ipairs(LE.plans) do
+            -- Card height: technique + path + rationale + steps preview + buttons
+            local cardH = 106
+            local card = mkFrame(levScroll, 0, 0, PW - 14, cardH, COL.ROW, 0.22, 53)
+            card.LayoutOrder = i
+            uiCorner(card, 5)
+
+            -- Proximity stripe on left
+            local proxCol = proxCols[plan.rceProximity] and
+                proxCols[plan.rceProximity].col or COL.DIM
+            local stripe = mkFrame(card, 0, 0, 4, cardH, proxCol, 0.10, 54)
+            uiCorner(stripe, 2)
+
+            -- Technique name
+            mkLabel(card, 9, 4, PW - 90, 14,
+                plan.technique, 9, COL.TEXT,
+                Enum.TextXAlignment.Left, 54)
+
+            -- Proximity badge
+            local proxLabel = proxCols[plan.rceProximity] and
+                proxCols[plan.rceProximity].label or "?"
+            local proxBg = mkFrame(card, PW - 82, 4, 68, 12, proxCol, 0.65, 54)
+            uiCorner(proxBg, 3)
+            mkLabel(proxBg, 0, 0, 68, 12, proxLabel, 6, proxCol,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Remote path
+            mkLabel(card, 9, 20, PW - 20, 11,
+                "→ " .. plan.remotePath, 7, COL.DIM,
+                Enum.TextXAlignment.Left, 54)
+
+            -- Rationale (truncated)
+            mkLabel(card, 9, 33, PW - 20, 11,
+                plan.rationale:sub(1, 88), 7,
+                Color3.fromRGB(160, 175, 210),
+                Enum.TextXAlignment.Left, 54)
+
+            -- First step preview
+            local step1 = plan.steps and plan.steps[1] or ""
+            mkLabel(card, 9, 46, PW - 20, 11,
+                step1:sub(1, 88), 7,
+                Color3.fromRGB(130, 200, 140),
+                Enum.TextXAlignment.Left, 54)
+
+            -- Payload preview
+            mkLabel(card, 9, 59, PW - 20, 11,
+                "Payload: " .. tostring(plan.payload):sub(1, 70),
+                7, Color3.fromRGB(200, 160, 80),
+                Enum.TextXAlignment.Left, 54)
+
+            -- Node type badge
+            local ntBg = mkFrame(card, 9, 74, 80, 12,
+                Color3.fromRGB(50, 60, 100), 0.50, 54)
+            uiCorner(ntBg, 3)
+            mkLabel(ntBg, 0, 0, 80, 12,
+                plan.nodeType, 6, COL.DIM,
+                Enum.TextXAlignment.Center, 55)
+
+            -- APPLY TO NODE button
+            local applyBtn = mkBtn(card, PW - 120, 72, 50, 16,
+                plan.applied and "✓ APPLIED" or "APPLY",
+                plan.applied
+                    and Color3.fromRGB(60, 120, 60)
+                    or  Color3.fromRGB(200, 40, 220),
+                plan.applied
+                    and Color3.fromRGB(100, 220, 100)
+                    or  Color3.fromRGB(200, 40, 220),
+                54)
+
+            -- VIEW STEPS button
+            local stepsBtn = mkBtn(card, PW - 66, 72, 52, 16, "STEPS",
+                Color3.fromRGB(90, 180, 255),
+                Color3.fromRGB(90, 180, 255), 54)
+
+            local captPlan = plan
+            applyBtn.MouseButton1Click:Connect(function()
+                if not captPlan.applied then
+                    local ok, result = LE:applyToNode(captPlan)
+                    if ok then
+                        applyBtn.Text             = "✓ APPLIED"
+                        applyBtn.BackgroundColor3 = Color3.fromRGB(60, 120, 60)
+                        applyBtn.TextColor3       = Color3.fromRGB(100, 220, 100)
+                    end
+                end
+            end)
+
+            stepsBtn.MouseButton1Click:Connect(function()
+                -- Show full steps in a temporary overlay card
+                local overlay = mkFrame(levPage, 2, 44, PW - 4, PH - 46,
+                    COL.BG, 0.04, 58)
+                uiCorner(overlay, 5)
+                uiStroke(overlay, proxCol, 0.30, 1)
+
+                -- Title
+                mkLabel(overlay, 8, 6, PW - 60, 16,
+                    captPlan.technique, 10, COL.TEXT,
+                    Enum.TextXAlignment.Left, 59)
+
+                -- Close button
+                local closeBtn = mkBtn(overlay, PW - 52, 5, 40, 16, "CLOSE",
+                    Color3.fromRGB(228, 60, 80),
+                    Color3.fromRGB(228, 60, 80), 59)
+                closeBtn.MouseButton1Click:Connect(function()
+                    overlay:Destroy()
+                end)
+
+                -- Steps list
+                local sy = 26
+                for si, step in ipairs(captPlan.steps) do
+                    local stepLbl = Instance.new("TextLabel")
+                    stepLbl.Position               = UDim2.fromOffset(8, sy)
+                    stepLbl.Size                   = UDim2.fromOffset(PW - 20, 0)
+                    stepLbl.BackgroundTransparency = 1
+                    stepLbl.Text                   = step
+                    stepLbl.TextSize               = 8
+                    stepLbl.Font                   = Enum.Font.Gotham
+                    stepLbl.TextColor3             = Color3.fromRGB(180, 210, 180)
+                    stepLbl.TextXAlignment         = Enum.TextXAlignment.Left
+                    stepLbl.TextYAlignment         = Enum.TextYAlignment.Top
+                    stepLbl.TextWrapped            = true
+                    stepLbl.AutomaticSize          = Enum.AutomaticSize.Y
+                    stepLbl.BorderSizePixel        = 0
+                    stepLbl.ZIndex                 = 59
+                    stepLbl.Parent                 = overlay
+                    sy = sy + 28
+                end
+
+                -- Payload
+                mkLabel(overlay, 8, sy + 4, PW - 20, 14,
+                    "Payload: " .. tostring(captPlan.payload):sub(1, 100),
+                    7, Color3.fromRGB(200, 160, 80),
+                    Enum.TextXAlignment.Left, 59)
+            end)
+        end
+
+        levScroll.CanvasSize = UDim2.fromOffset(0, #LE.plans * 110)
+    end
+
+    -- Wire LE plan callback to rebuild
+    local _prevOnPlan = LE.onPlan
+    LE.onPlan = function(p)
+        if _prevOnPlan then _prevOnPlan(p) end
+        rebuildLeverage()
+    end
+
+    preScanBtn.MouseButton1Click:Connect(function()
+        preScanBtn.Text = "…"
+        task.spawn(function()
+            local count, ranked = LE:scanAndResolveAll()
+            preScanBtn.Text = "PRE-SCAN"
+            rebuildLeverage()
+        end)
+    end)
+
+    scanAllBtn.MouseButton1Click:Connect(function()
+        scanAllBtn.Text = "RUNNING…"
+        -- Pre-scan first, then full fuzz
+        task.spawn(function()
+            LE:scanAndResolveAll()
+            DAL:fuzzAll(nil, function()
+                scanAllBtn.Text = "SCAN ALL"
+                rebuildLeverage()
+            end)
+        end)
+    end)
+
+    return rebuildLeverage
+end
+
 local function buildPanel(parentGui)
 
     -- Root -- fills the entire DAL tab page
@@ -11162,6 +11882,7 @@ local function buildPanel(parentGui)
         { label = "VIOLATIONS", accent = Color3.fromRGB(228,  60,  80) },
         { label = "FUZZER",     accent = Color3.fromRGB(220, 175,  50) },
         { label = "C2 LOG",     accent = Color3.fromRGB(160,  80, 255) },
+        { label = "LEVERAGE",   accent = Color3.fromRGB(200,  40, 220) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -11219,6 +11940,7 @@ local function buildPanel(parentGui)
     local rebuildViolations = buildViolationsTab(pages[2], PW, PH)
     buildFuzzerTab(pages[3], PW, PH, rebuildViolations)
     buildC2LogTab(pages[4], PW, PH)
+    buildLeverageTab(pages[5], PW, PH, switchTab)
 
     -- ── Wire discovery → remote list + live stats ──────────────────
     DAL.onDiscovery = function()
@@ -11243,6 +11965,535 @@ local function buildPanel(parentGui)
 
     return root
 end
+-- ══════════════════════════════════════════════════════════════════
+--   LEVERAGE ENGINE
+--   The core of DAL's purpose: takes a confirmed violation and
+--   answers three questions:
+--     1. WHAT does this vulnerability class enable?
+--     2. HOW do you use it to move toward SB-RCE?
+--     3. WHICH node type should be added to the S->S graph?
+--
+--   Every violation gets a LeverageReport:
+--   {
+--     headline    : string  -- one line, what the attacker gains
+--     mechanism   : string  -- how the flaw is exploited
+--     rceVector   : string  -- concrete path toward SB-RCE
+--     nodeTypeId  : string  -- NODE_TYPES id to spawn ("REMOTE","BINDABLE",etc.)
+--     nodeLabel   : string  -- label for the spawned node
+--     nodeAction  : string  -- pre-selected action on the spawned node
+--     confidence  : string  -- "Confirmed" | "Probable" | "Structural"
+--     steps       : table   -- ordered list of strings: the attack path
+--   }
+-- ══════════════════════════════════════════════════════════════════
+
+-- ── Leverage templates keyed by VTYPE ────────────────────────────
+local LEVERAGE_TEMPLATES = {}
+
+LEVERAGE_TEMPLATES[VTYPE.STATE_SPOOF] = {
+    headline   = "Server silently processed malformed data — trust boundary is absent.",
+    mechanism  = "The server received a payload that violated its expected type contract "
+              .. "and continued executing instead of rejecting it. This means no guard "
+              .. "clause exists at this boundary.",
+    rceVector  = "Escalation path: (1) Confirm which downstream function consumed the "
+              .. "malformed value. (2) If that function feeds a string into require(), "
+              .. "loadstring(), or Instance.new(), the type-confusion payload becomes an "
+              .. "execution injection vector. Fuzz with RCE probes on this remote next.",
+    nodeTypeId = "REMOTE",
+    nodeAction = "RemoteEvent",
+    confidence = "Confirmed",
+    steps = {
+        "Client sends malformed payload (NaN / math.huge / wrong type).",
+        "Server receives value — no type assertion fires.",
+        "Value propagates to downstream handler unchecked.",
+        "If handler passes value to require() / loadstring() / Instance.new():",
+        "  → Attacker controls the instruction, not just the data.",
+        "  → SB-RCE achieved.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.SILENT_PROCESS] = {
+    headline   = "Server consumed the probe silently — no rejection, no error.",
+    mechanism  = "A malformed payload reached the server and was processed without "
+              .. "triggering a visible error. This indicates the server has no input "
+              .. "validation at this boundary and will accept arbitrary data shapes.",
+    rceVector  = "Silent acceptance is the precondition for every higher-class attack. "
+              .. "Run an RCE boundary probe on this remote immediately — if the server "
+              .. "treats strings as instructions anywhere in its handler chain, this "
+              .. "boundary is your entry point for execution injection.",
+    nodeTypeId = "REMOTE",
+    nodeAction = "RemoteEvent",
+    confidence = "Confirmed",
+    steps = {
+        "Client sends malformed payload.",
+        "Server processes silently — no guard exists.",
+        "Attacker escalates payload type toward code strings.",
+        "If server evaluates string payload: SB-RCE entry point confirmed.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.IDENTITY_LOSS] = {
+    headline   = "Server lost track of who made this request — identity can be spoofed.",
+    mechanism  = "The RemoteEvent securely prepends the Player object as the first "
+              .. "argument. However, when this remote hands off to a BindableEvent or "
+              .. "module, the Player reference is dropped. Downstream systems use a "
+              .. "client-supplied UserId instead of the engine-guaranteed one.",
+    rceVector  = "Inject a target UserId (e.g. a server admin or developer) as the "
+              .. "identity argument. If the downstream handler grants elevated access "
+              .. "based on that spoofed identity, you gain admin-level execution context "
+              .. "without breaking the sandbox — and from that context, admin commands "
+              .. "may load or execute arbitrary scripts.",
+    nodeTypeId = "BINDABLE",
+    nodeAction = "BindableEvent",
+    confidence = "Confirmed",
+    steps = {
+        "Client fires RemoteEvent — engine guarantees Player as arg[1].",
+        "Server handler receives Player correctly.",
+        "Handler fires BindableEvent WITHOUT passing Player forward.",
+        "Downstream module reads UserId from payload instead of engine.",
+        "Attacker supplies UserId of admin/developer.",
+        "Downstream system grants elevated permissions to attacker.",
+        "With elevated context: admin commands may invoke loadstring() → SB-RCE.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.BROADCAST_POISON] = {
+    headline   = "Client can force a payload into fleet-wide broadcast — one injection, all servers.",
+    mechanism  = "A RemoteEvent on this client feeds data into a MessagingService "
+              .. "PublishAsync call without sanitizing the payload first. Because "
+              .. "MessagingService is treated as a trusted inter-server channel, "
+              .. "receiving servers consume that data without re-validating it.",
+    rceVector  = "Craft a payload containing a malformed JSON structure or oversized "
+              .. "string. Fire it through the identified ingress remote. If receiving "
+              .. "servers pass the broadcasted payload into DataStore:SetAsync(), "
+              .. "Instance.new(), or a script attribute, the entire game fleet is "
+              .. "compromised simultaneously from a single injection.",
+    nodeTypeId = "SERVICE",
+    nodeAction = "MessagingService",
+    confidence = "Structural",
+    steps = {
+        "Identify the RemoteEvent → PublishAsync ingress path (double ingress).",
+        "Craft malformed payload targeting the receiving server's handler.",
+        "Fire the ingress remote once from one client.",
+        "MessagingService broadcasts poisoned data to ALL active servers.",
+        "Receiving servers process payload as trusted — no re-validation.",
+        "If payload reaches loadstring / require / Instance.new: fleet-wide SB-RCE.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.RACE_PRECOND] = {
+    headline   = "No concurrency guard — rapid fire passes balance checks before commit.",
+    mechanism  = "This remote handles an economy or state-change action without a "
+              .. "debounce, mutex, or transaction wrapper. Multiple simultaneous "
+              .. "requests can each pass the 'do they have enough?' check before "
+              .. "the first deduction is saved to the DataStore.",
+    rceVector  = "While not a direct RCE vector, race conditions on economy remotes "
+              .. "can grant unlimited resources. Unlimited resources unlock premium "
+              .. "features that may call require() or loadstring() with attacker- "
+              .. "influenced arguments — creating an indirect path to SB-RCE.",
+    nodeTypeId = "SERVICE",
+    nodeAction = "DataStoreService",
+    confidence = "Structural",
+    steps = {
+        "Spam the economy remote 200+ times in under 1 second.",
+        "Multiple requests pass the balance check before first commit.",
+        "Player acquires items/currency far beyond intended limits.",
+        "Use accumulated resources to trigger premium code paths.",
+        "Probe those code paths for loadstring / require sinks.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.DOUBLE_INGRESS] = {
+    headline   = "Remote feeds MessagingService — this is the fleet-broadcast fuse.",
+    mechanism  = "This remote's name matches patterns associated with cross-server "
+              .. "broadcast. If it routes to MessagingService:PublishAsync(), a single "
+              .. "poisoned client payload will be replicated to every active server "
+              .. "in the game fleet, bypassing per-server validation entirely.",
+    rceVector  = "Confirm the PublishAsync path by injecting a sentinel string and "
+              .. "monitoring whether a second server echoes it. If confirmed, craft "
+              .. "a payload targeting the most dangerous sink in the receiving handler "
+              .. "(DataStore write, Instance.new, require). One fire = fleet-wide impact.",
+    nodeTypeId = "SERVICE",
+    nodeAction = "MessagingService",
+    confidence = "Structural",
+    steps = {
+        "Remote identified as potential MessagingService ingress.",
+        "Inject sentinel payload through this remote.",
+        "Monitor C2 log for fleet echo (second server receiving sentinel).",
+        "If confirmed: craft targeted exploit payload.",
+        "Single injection propagates to all servers simultaneously.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.LOGIC_BYPASS] = {
+    headline   = "Server performs a trust-based decision — assumption can be violated.",
+    mechanism  = "The server is making a decision based on what the client is expected "
+              .. "to send, rather than what the server can prove. The developer assumed "
+              .. "a constraint (range, type, context) that the client is never actually "
+              .. "forced to respect.",
+    rceVector  = "Logic bypasses are the entry point for higher-class attacks. "
+              .. "Escalation: (1) Map what state change this bypass allows. "
+              .. "(2) Use that state change to reach a code path that calls "
+              .. "require() or loadstring() with data you influence. "
+              .. "(3) That influence becomes execution.",
+    nodeTypeId = "REMOTE",
+    nodeAction = "RemoteEvent",
+    confidence = "Probable",
+    steps = {
+        "Identify the developer assumption being violated.",
+        "Confirm the server executes the downstream logic without validation.",
+        "Map which state changes result from the bypass.",
+        "Trace whether any state change reaches a code execution sink.",
+        "If yes: logic bypass → state manipulation → SB-RCE.",
+    },
+}
+
+LEVERAGE_TEMPLATES[VTYPE.RCE_BOUNDARY] = {
+    headline   = "EXECUTION BOUNDARY CONFIRMED — server treated attacker string as code.",
+    mechanism  = "The server received a string probe and echoed back an execution "
+              .. "signature, OR the remote's handler passes string arguments into "
+              .. "loadstring(), require(), getfenv(), or a custom interpreter. "
+              .. "The data-to-instruction boundary has been crossed.",
+    rceVector  = "SB-RCE IS ACHIEVABLE FROM THIS REMOTE. Next steps: "
+              .. "(1) Confirm execution environment via getfenv() probe. "
+              .. "(2) Enumerate accessible globals (DataStoreService, Players, etc). "
+              .. "(3) Inject persistent payload — a function that fires on every "
+              .. "PlayerAdded event — to maintain persistent server-side control.",
+    nodeTypeId = "REQUIRE",
+    nodeAction = "External Asset ID",
+    confidence = "Confirmed",
+    steps = {
+        "Execution boundary confirmed — string was interpreted as code.",
+        "Probe execution environment: getfenv() / getgc() enumeration.",
+        "Map accessible globals: DataStore, Players, ServerStorage.",
+        "Craft persistent payload (PlayerAdded hook).",
+        "Inject payload through confirmed execution sink.",
+        "SB-RCE ACHIEVED — persistent server-side control established.",
+    },
+}
+
+-- ── Core leverage function ────────────────────────────────────────
+function DAL:buildLeverageReport(violation)
+    local template = LEVERAGE_TEMPLATES[violation.vtype]
+
+    -- Fallback for unknown violation types
+    if not template then
+        return {
+            headline   = "Vulnerability class logged — manual analysis required.",
+            mechanism  = "No leverage template exists for: " .. tostring(violation.vtype),
+            rceVector  = "Review the violation evidence manually and cross-reference "
+                      .. "with known attack patterns for this remote.",
+            nodeTypeId = "REMOTE",
+            nodeAction = "RemoteEvent",
+            confidence = "Unknown",
+            steps      = { "Manual review required." },
+        }
+    end
+
+    -- Deep copy so we can annotate without mutating the template
+    local report = {
+        headline    = template.headline,
+        mechanism   = template.mechanism,
+        rceVector   = template.rceVector,
+        nodeTypeId  = template.nodeTypeId,
+        nodeAction  = template.nodeAction,
+        confidence  = template.confidence,
+        steps       = {},
+        -- Violation metadata attached for the UI
+        violationId = violation.id,
+        remotePath  = violation.remotePath,
+        severity    = violation.severity,
+        vtype       = violation.vtype,
+        traceId     = violation.traceId,
+        -- Node label derived from the remote's last path segment
+        nodeLabel   = violation.remotePath:match("([^%.]+)$") or violation.remotePath,
+    }
+
+    for _, step in ipairs(template.steps) do
+        table.insert(report.steps, step)
+    end
+
+    -- Attach the violation's own evidence as a final context line
+    table.insert(report.steps,
+        "Evidence: " .. (violation.evidence or "none"):sub(1, 120))
+
+    return report
+end
+
+-- ── Apply to Node: pushes a leverage report into the S->S graph ──
+function DAL:applyToNode(report)
+    -- Find the matching NODE_TYPE entry
+    local targetTypeData = nil
+    for _, td in ipairs(NODE_TYPES) do
+        if td.id == report.nodeTypeId then
+            targetTypeData = td
+            break
+        end
+    end
+    if not targetTypeData then
+        -- Fallback: use REMOTE
+        for _, td in ipairs(NODE_TYPES) do
+            if td.id == "REMOTE" then
+                targetTypeData = td break
+            end
+        end
+    end
+    if not targetTypeData then return false, "No matching node type found" end
+
+    -- Switch to the S->S tab so the user sees the graph
+    activateGraphCtx("SS", ssCtx)
+
+    -- Spawn the node using the existing graph system
+    local canvas = ssCtx.canvas
+    local cx = 80 + (#ssCtx.nodes * 22) % 400
+    local cy = 60 + math.floor(#ssCtx.nodes / 18) * 60
+    if canvas then
+        -- Place it near the right side of existing nodes if any
+        if #ssCtx.nodes > 0 then
+            local last = ssCtx.nodes[#ssCtx.nodes]
+            if last and last.frame then
+                cx = last.frame.Position.X.Offset + 140
+                cy = last.frame.Position.Y.Offset
+            end
+        end
+    end
+
+    local newNode = spawnNode(targetTypeData, cx, cy)
+    if not newNode then return false, "spawnNode returned nil" end
+
+    -- Pre-configure the node's action to match the leverage report
+    for _, action in ipairs(targetTypeData.actions or {}) do
+        if action.n == report.nodeAction then
+            newNode.selectedAction = action
+            newNode.actionLbl.Text = action.n .. " — " .. action.d
+            break
+        end
+    end
+
+    -- Store the leverage context on the node for reference
+    newNode.leverageReport  = report
+    newNode.leverageSource  = report.remotePath
+    newNode.inputValue      = report.remotePath
+
+    -- Log to DALSink
+    DALSink:push({
+        type     = "APPLY_NODE",
+        sev      = report.severity and report.severity.label or "?",
+        path     = report.remotePath,
+        evidence = "Node spawned: " .. report.nodeTypeId ..
+                   " ← " .. report.vtype,
+    })
+
+    return true, newNode
+end
+
+-- ── Leverage cache: violations → reports (computed lazily) ────────
+DAL.leverageCache = {}
+
+function DAL:getLeverageReport(violation)
+    if not self.leverageCache[violation.id] then
+        self.leverageCache[violation.id] = self:buildLeverageReport(violation)
+    end
+    return self.leverageCache[violation.id]
+end
+
+-- Clear cache when violations are cleared
+local _origClearViol = DAL.clearViolations
+function DAL:clearViolations()
+    _origClearViol(self)
+    self.leverageCache = {}
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--   LEVERAGE PANEL
+--   A floating overlay that appears when the user clicks a
+--   violation row. Shows the full LeverageReport for that violation:
+--     - Headline (what you gain)
+--     - Mechanism (why the flaw exists)
+--     - Attack steps (ordered path)
+--     - RCE vector (how to reach SB-RCE)
+--     - [APPLY TO NODE] button
+--     - [FUZZ AGAIN] button (re-runs probes on same remote)
+-- ══════════════════════════════════════════════════════════════════
+local leveragePanel = nil   -- singleton, shown/hidden per violation
+
+local function closeLeveragePanel()
+    if leveragePanel then
+        leveragePanel:Destroy()
+        leveragePanel = nil
+    end
+end
+
+local function showLeveragePanel(parentGui, violation, report)
+    closeLeveragePanel()
+
+    local PW, PH = 520, 420
+    local LP = mkFrame(parentGui, 0, 0, PW, PH, Color3.fromRGB(8,10,18), 0.04, 80)
+    LP.Position = UDim2.fromOffset(
+        math.max(4, math.floor((parentGui.AbsoluteSize.X - PW) / 2)),
+        math.max(4, math.floor((parentGui.AbsoluteSize.Y - PH) / 2))
+    )
+    uiCorner(LP, 10)
+    uiStroke(LP, report.severity.col, 0.25, 1)
+    leveragePanel = LP
+
+    -- Severity glow strip on left edge
+    local strip = mkFrame(LP, 0, 0, 4, PH, report.severity.col, 0.0, 81)
+    uiCorner(strip, 2)
+
+    -- Header bar
+    local hdr = mkFrame(LP, 0, 0, PW, 36, Color3.fromRGB(12,14,26), 0.08, 81)
+    uiCorner(hdr, 10)
+
+    -- Confidence badge
+    local confCol = report.confidence == "Confirmed"  and Color3.fromRGB(228, 60, 80)
+                 or report.confidence == "Probable"   and Color3.fromRGB(220,120, 50)
+                 or                                        Color3.fromRGB( 90,180,255)
+    local confBg = mkFrame(hdr, 8, 9, 70, 18, confCol, 0.65, 82)
+    uiCorner(confBg, 4)
+    mkLabel(confBg, 0, 0, 70, 18, report.confidence, 7, confCol,
+        Enum.TextXAlignment.Center, 83)
+
+    -- Violation type
+    mkLabel(hdr, 84, 0, PW - 160, 36, report.vtype, 9, COL.TEXT,
+        Enum.TextXAlignment.Left, 82)
+
+    -- Close button
+    local closeBtn = mkBtn(hdr, PW - 34, 8, 20, 20, "✕",
+        Color3.fromRGB(228,60,80), Color3.fromRGB(228,60,80), 82)
+    closeBtn.MouseButton1Click:Connect(closeLeveragePanel)
+
+    -- Remote path label
+    mkLabel(LP, 8, 38, PW - 16, 14,
+        "⟶ " .. report.remotePath, 7, COL.DIM,
+        Enum.TextXAlignment.Left, 81)
+
+    -- Scroll area for the full report
+    local scroll = mkScroll(LP, 4, 54, PW - 8, PH - 120, 81)
+
+    local function addSection(title, body, titleCol)
+        local tRow = mkFrame(scroll, 0, 0, PW - 18, 18,
+            Color3.new(0,0,0), 1, 82)
+        tRow.LayoutOrder = #scroll:GetChildren()
+        mkLabel(tRow, 0, 0, PW - 18, 18,
+            "▸ " .. title, 8, titleCol or report.severity.col,
+            Enum.TextXAlignment.Left, 83)
+
+        local bodyLines = {}
+        local maxW = PW - 26
+        -- word-wrap at ~90 chars
+        local wrapped = body:gsub("(.{1,90})(%s+)", "%1\n"):gsub("(.{1,90})$", "%1")
+        for line in (wrapped .. "\n"):gmatch("([^\n]*)\n") do
+            if line ~= "" then table.insert(bodyLines, line) end
+        end
+
+        for _, line in ipairs(bodyLines) do
+            local lRow = mkFrame(scroll, 0, 0, PW - 18, 14,
+                Color3.new(0,0,0), 1, 82)
+            lRow.LayoutOrder = #scroll:GetChildren()
+            mkLabel(lRow, 8, 0, PW - 26, 14, line, 7,
+                Color3.fromRGB(185, 195, 225),
+                Enum.TextXAlignment.Left, 83)
+        end
+
+        -- Spacer
+        local spacer = mkFrame(scroll, 0, 0, PW - 18, 6,
+            Color3.new(0,0,0), 1, 82)
+        spacer.LayoutOrder = #scroll:GetChildren()
+    end
+
+    -- WHAT YOU GAIN
+    addSection("WHAT YOU GAIN", report.headline, Color3.fromRGB(228,60,80))
+
+    -- MECHANISM
+    addSection("MECHANISM", report.mechanism, Color3.fromRGB(220,120,50))
+
+    -- ATTACK PATH
+    local stepTitle = mkFrame(scroll, 0, 0, PW - 18, 18,
+        Color3.new(0,0,0), 1, 82)
+    stepTitle.LayoutOrder = #scroll:GetChildren()
+    mkLabel(stepTitle, 0, 0, PW - 18, 18,
+        "▸ ATTACK PATH → SB-RCE", 8, Color3.fromRGB(90,180,255),
+        Enum.TextXAlignment.Left, 83)
+
+    for i, step in ipairs(report.steps) do
+        local sRow = mkFrame(scroll, 0, 0, PW - 18, 14,
+            Color3.new(0,0,0), 1, 82)
+        sRow.LayoutOrder = #scroll:GetChildren()
+        mkLabel(sRow, 8, 0, PW - 26, 14,
+            string.format("%d. %s", i, step), 7,
+            Color3.fromRGB(185, 195, 225),
+            Enum.TextXAlignment.Left, 83)
+    end
+
+    local spacer2 = mkFrame(scroll, 0, 0, PW - 18, 6,
+        Color3.new(0,0,0), 1, 82)
+    spacer2.LayoutOrder = #scroll:GetChildren()
+
+    -- RCE VECTOR
+    addSection("PATH TO SB-RCE", report.rceVector, Color3.fromRGB(200,40,220))
+
+    -- Recalculate canvas height
+    local totalH = 0
+    for _, c in ipairs(scroll:GetChildren()) do
+        if c:IsA("Frame") then totalH = totalH + c.AbsoluteSize.Y + 2 end
+    end
+    scroll.CanvasSize = UDim2.fromOffset(0, totalH + 20)
+
+    -- Action buttons
+    local btnY = PH - 56
+
+    -- [APPLY TO NODE] — the centrepiece
+    local applyBtn = mkBtn(LP, 8, btnY, PW - 120, 40,
+        "⬡  APPLY TO NODE  →  S→S GRAPH",
+        Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 82)
+    applyBtn.TextSize = 9
+
+    applyBtn.MouseButton1Click:Connect(function()
+        applyBtn.Text = "Spawning node…"
+        local ok, result = DAL:applyToNode(report)
+        if ok then
+            applyBtn.Text = "✓ Node added to S→S"
+            applyBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
+            task.delay(1.5, closeLeveragePanel)
+        else
+            applyBtn.Text = "✗ " .. tostring(result)
+            applyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+        end
+    end)
+
+    -- [FUZZ AGAIN] — re-runs probes on the same remote
+    local fuzzBtn = mkBtn(LP, PW - 108, btnY, 100, 40,
+        "⟳  FUZZ AGAIN",
+        Color3.fromRGB(220,175,50), Color3.fromRGB(220,175,50), 82)
+    fuzzBtn.TextSize = 8
+
+    fuzzBtn.MouseButton1Click:Connect(function()
+        fuzzBtn.Text = "Running…"
+        DAL:fuzzRemote(report.remotePath, nil, function()
+            fuzzBtn.Text = "⟳  FUZZ AGAIN"
+        end)
+    end)
+
+    return LP
+end
+
+-- ── Wire leverage panel into the violations tab ───────────────────
+-- Called by buildViolationsTab — injects "LEVERAGE ▸" button on
+-- each violation row that opens the leverage panel on click.
+function DAL:attachLeverageToRow(row, violation, parentGui)
+    local PW = row.AbsoluteSize.X > 0 and row.AbsoluteSize.X or 500
+    local leverageBtn = mkBtn(row, PW - 130, 5, 80, 18, "LEVERAGE ▸",
+        Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 55)
+
+    local captV = violation
+    leverageBtn.MouseButton1Click:Connect(function()
+        local report = DAL:getLeverageReport(captV)
+        showLeveragePanel(parentGui, captV, report)
+    end)
+
+    return leverageBtn
+end
+
 -- ══════════════════════════════════════════════════════════════════
 --   INITIALIZATION
 --   Call DAL:init(parentFrame, x, y) to spawn the panel and start
