@@ -11343,17 +11343,21 @@ local function buildViolationsTab(violPage, PW, PH)
             local captV = v
             leverageBtn.MouseButton1Click:Connect(function()
                 local report = DAL:getLeverageReport(captV)
-                showLeveragePanel(violPage.Parent, captV, report)
+                DAL.showLeveragePanel(violPage.Parent, captV, report)
             end)
 
             applyBtn.MouseButton1Click:Connect(function()
                 applyBtn.Text = "..."
                 local report = DAL:getLeverageReport(captV)
                 local ok, result = DAL:applyToNode(report)
-                applyBtn.Text = ok and "[OK] Added" or "[X] Failed"
-                task.delay(2, function()
-                    applyBtn.Text = "APPLY TO NODE"
-                end)
+                if ok then
+                    applyBtn.Text = "[OK] Added"
+                    task.delay(2, function() applyBtn.Text = "APPLY TO NODE" end)
+                else
+                    -- Surface the reason so the user knows what to do
+                    applyBtn.Text = "[!] " .. tostring(result):sub(1, 30)
+                    task.delay(4, function() applyBtn.Text = "APPLY TO NODE" end)
+                end
             end)
         end
         violScroll.CanvasSize = UDim2.fromOffset(0, #DAL.violations * (ROW_H + 2))
@@ -12242,6 +12246,12 @@ function DAL:applyToNode(report)
     -- Switch to the S->S tab so the user sees the graph
     activateGraphCtx("SS", ssCtx)
 
+    -- Guard: if the S->S canvas isn't initialised yet (user hasn't
+    -- visited that tab since loading), we can't spawn into it.
+    if not ssCtx.canvas then
+        return false, "S->S canvas not ready -- click the S->S tab first, then try again"
+    end
+
     -- Spawn the node using the existing graph system
     local canvas = ssCtx.canvas
     local cx = 80 + (#ssCtx.nodes * 22) % 400
@@ -12505,6 +12515,13 @@ function DAL:init(parent)
     self:startCrawlLoop()
     return self.panel
 end
+
+-- Expose leverage panel functions so outer-scope tab builders can
+-- reach them. showLeveragePanel and closeLeveragePanel are local to
+-- this IIFE and invisible outside it -- exposing through DAL bridges
+-- the scope boundary without restructuring the whole module.
+DAL.showLeveragePanel  = showLeveragePanel
+DAL.closeLeveragePanel = closeLeveragePanel
 
     return DAL
 end)()
