@@ -9329,6 +9329,7 @@ function HTTP.gen:showPrompt()
         mC(b,4) mS(b,td.col,0.40,1)
         mL(b,0,0,72,22,td.label,Enum.Font.GothamBold,8,td.col,
             Enum.TextXAlignment.Center,94)
+        td.btn = b   -- store so the click handler can update all buttons
         local captTd=td
         b.MouseButton1Click:Connect(function()
             if captTd.label=="BOTH" then
@@ -9340,10 +9341,12 @@ function HTTP.gen:showPrompt()
             end
             -- Update button visuals to reflect selection
             for _, ref in ipairs(tabDefs) do
-                local active = (ref.label=="BOTH" and ssOn.v and hpdcOn.v)
-                    or (ref.label=="S->S"  and ssOn.v  and not hpdcOn.v)
-                    or (ref.label=="HPDC"  and hpdcOn.v and not ssOn.v)
-                ref.btn.BackgroundTransparency = active and 0.55 or 0.85
+                if ref.btn then
+                    local active = (ref.label=="BOTH" and ssOn.v and hpdcOn.v)
+                        or (ref.label=="S->S"  and ssOn.v  and not hpdcOn.v)
+                        or (ref.label=="HPDC"  and hpdcOn.v and not ssOn.v)
+                    ref.btn.BackgroundTransparency = active and 0.55 or 0.85
+                end
             end
         end)
     end
@@ -12727,27 +12730,30 @@ function DAL:applyToNode(report)
     end
     if not targetTypeData then return false, "No matching node type found" end
 
-    -- Switch to the S->S tab so the user sees the graph
+    -- Switch to the S->S tab so the user sees the graph.
+    -- Note: activateGraphCtx is a no-op when S->S is already active,
+    -- which means ssCtx.canvas stays nil (it only gets populated when
+    -- switching AWAY from S->S). We use graphCanvas directly instead --
+    -- it's always the live canvas regardless of context-save state.
     activateGraphCtx("SS", ssCtx)
 
-    -- Guard: if the S->S canvas isn't initialised yet (user hasn't
-    -- visited that tab since loading), we can't spawn into it.
-    if not ssCtx.canvas then
-        return false, "S->S canvas not ready -- click the S->S tab first, then try again"
+    -- graphCanvas is the actual live ScrollingFrame used by spawnNode.
+    -- ssCtx.canvas is only populated on context SWITCHES, not on first load.
+    if not graphCanvas then
+        return false,
+            "S->S graph canvas not ready -- visit the S->S tab once first"
     end
 
     -- Spawn the node using the existing graph system
-    local canvas = ssCtx.canvas
-    local cx = 80 + (#ssCtx.nodes * 22) % 400
-    local cy = 60 + math.floor(#ssCtx.nodes / 18) * 60
-    if canvas then
-        -- Place it near the right side of existing nodes if any
-        if #ssCtx.nodes > 0 then
-            local last = ssCtx.nodes[#ssCtx.nodes]
-            if last and last.frame then
-                cx = last.frame.Position.X.Offset + 140
-                cy = last.frame.Position.Y.Offset
-            end
+    -- Use graphCanvas (the live canvas) not ssCtx.canvas (only set on context switches)
+    local cx = 80 + (#graphNodes * 22) % 400
+    local cy = 60 + math.floor(#graphNodes / 18) * 60
+    if graphCanvas and #graphNodes > 0 then
+        -- Place it to the right of the last existing node
+        local last = graphNodes[#graphNodes]
+        if last and last.frame then
+            cx = last.frame.Position.X.Offset + 140
+            cy = last.frame.Position.Y.Offset
         end
     end
 
