@@ -11887,6 +11887,7 @@ local function buildPanel(parentGui)
         { label = "FUZZER",     accent = Color3.fromRGB(220, 175,  50) },
         { label = "C2 LOG",     accent = Color3.fromRGB(160,  80, 255) },
         { label = "LEVERAGE",   accent = Color3.fromRGB(200,  40, 220) },
+        { label = "PRE-SCAN",   accent = Color3.fromRGB( 40, 180, 120) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -11945,6 +11946,7 @@ local function buildPanel(parentGui)
     buildFuzzerTab(pages[3], PW, PH, rebuildViolations)
     buildC2LogTab(pages[4], PW, PH)
     buildLeverageTab(pages[5], PW, PH, switchTab)
+    buildSpsTab(pages[6], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -11969,6 +11971,488 @@ local function buildPanel(parentGui)
 
     return root
 end
+-- ==================================================================
+--   STATIC PRE-SCAN  (SPS)
+--   Tier 0 of the attack pipeline -- runs BEFORE any fuzzing.
+--
+--   Purpose: find the TARGET before pulling the trigger.
+--   Instead of blindly probing every remote, SPS reads everything
+--   it can about each remote without touching it, scores it across
+--   five independent risk axes, then returns a ranked priority list
+--   that tells the fuzzer exactly where to aim first.
+--
+--   Five scoring axes:
+--     1. NAME SEMANTICS    -- does the name suggest an execution sink?
+--     2. ANCESTRY          -- where in the DataModel does it live?
+--     3. ARG SHAPE         -- does the handler accept arbitrary strings?
+--     4. IDENTITY CHAIN    -- does the path pass through a Bindable?
+--     5. BROADCAST VECTOR  -- does the name imply fleet-wide reach?
+-- ==================================================================
+
+-- ----------------------------------------------------------------
+--   SCORING DICTIONARIES
+-- ----------------------------------------------------------------
+local SPS_EXEC_KEYWORDS = {
+    { kw="loadstring",  w=20 }, { kw="eval",       w=18 },
+    { kw="execute",     w=16 }, { kw="exec",        w=16 },
+    { kw="interpret",   w=16 }, { kw="compile",     w=14 },
+    { kw="run",         w=12 }, { kw="dispatch",    w=10 },
+    { kw="invoke",      w=10 }, { kw="perform",     w=8  },
+    { kw="process",     w=8  }, { kw="handle",      w=6  },
+    { kw="call",        w=6  }, { kw="trigger",     w=6  },
+    { kw="command",     w=8  }, { kw="cmd",         w=8  },
+    { kw="script",      w=10 }, { kw="code",        w=10 },
+    { kw="require",     w=12 }, { kw="load",        w=10 },
+    { kw="import",      w=8  }, { kw="inject",      w=10 },
+    { kw="insert",      w=6  }, { kw="create",      w=4  },
+    { kw="spawn",       w=8  }, { kw="instantiate", w=10 },
+    { kw="admin",       w=8  }, { kw="auth",        w=6  },
+    { kw="token",       w=6  }, { kw="key",         w=4  },
+    { kw="secret",      w=8  }, { kw="permission",  w=4  },
+    { kw="grant",       w=6  }, { kw="elevate",     w=10 },
+    { kw="sudo",        w=12 }, { kw="root",        w=8  },
+    { kw="system",      w=6  }, { kw="internal",    w=4  },
+}
+
+local SPS_ANCESTRY_SCORES = {
+    ["ServerScriptService"] = 20,
+    ["ServerStorage"]       = 18,
+    ["ReplicatedStorage"]   = 8,
+    ["ReplicatedFirst"]     = 6,
+    ["Workspace"]           = 10,
+    ["StarterGui"]          = 4,
+    ["StarterPack"]         = 4,
+    ["StarterPlayer"]       = 4,
+    ["Players"]             = 12,
+}
+
+local SPS_BROADCAST_KEYWORDS = {
+    { kw="broadcast",   w=16 }, { kw="fleet",      w=16 },
+    { kw="global",      w=12 }, { kw="publish",    w=14 },
+    { kw="message",     w=8  }, { kw="announce",   w=10 },
+    { kw="notify",      w=8  }, { kw="alert",      w=6  },
+    { kw="sync",        w=6  }, { kw="replicate",  w=8  },
+    { kw="propagate",   w=10 }, { kw="distribute", w=10 },
+    { kw="crossserver", w=18 }, { kw="cross_srv",  w=18 },
+}
+
+local SPS_ECONOMY_KEYWORDS = {
+    { kw="buy",      w=8 }, { kw="purchase", w=8 },
+    { kw="sell",     w=6 }, { kw="trade",    w=8 },
+    { kw="transfer", w=8 }, { kw="redeem",   w=6 },
+    { kw="claim",    w=6 }, { kw="collect",  w=4 },
+    { kw="upgrade",  w=4 }, { kw="spend",    w=6 },
+    { kw="withdraw", w=8 }, { kw="deposit",  w=8 },
+    { kw="coin",     w=6 }, { kw="gold",     w=6 },
+    { kw="cash",     w=6 }, { kw="currency", w=8 },
+    { kw="points",   w=4 }, { kw="xp",       w=4 },
+    { kw="level",    w=4 }, { kw="loot",     w=4 },
+}
+
+-- ----------------------------------------------------------------
+--   SPS STATE
+-- ----------------------------------------------------------------
+local SPS = { results = {}, lastScan = 0 }
+
+local function spsGetAncestry(inst)
+    local score = 0; local ancestor = "Unknown"
+    local p = inst.Parent; local depth = 0
+    while p and p ~= game and depth < 8 do
+        local sc = SPS_ANCESTRY_SCORES[p.Name]
+        if sc and sc > score then score = sc; ancestor = p.Name end
+        p = p.Parent; depth = depth + 1
+    end
+    return score, ancestor
+end
+
+local function spsKeywordScore(name, kwTable)
+    local lower = name:lower(); local total = 0; local hits = {}
+    for _, e in ipairs(kwTable) do
+        if lower:find(e.kw, 1, true) then
+            total = total + e.w; table.insert(hits, e.kw)
+        end
+    end
+    return total, hits
+end
+
+local function spsArgShape(inst)
+    local score = 0; local findings = {}
+    local name = inst.Name:lower()
+    local strKws = { "command","cmd","query","message","text","chat",
+                     "input","data","payload","content","action","type",
+                     "event","request","call" }
+    for _, kw in ipairs(strKws) do
+        if name:find(kw, 1, true) then
+            score = score + 6
+            table.insert(findings, "arg-shape:" .. kw); break
+        end
+    end
+    local parent = inst.Parent
+    if parent then
+        local ok, ch = pcall(function() return parent:GetChildren() end)
+        if ok then
+            for _, sib in ipairs(ch) do
+                if sib ~= inst and sib:IsA("LocalScript") and
+                   sib.Name:lower():find(name:sub(1,4), 1, true) then
+                    score = score + 8
+                    table.insert(findings, "sibling-ls:" .. sib.Name); break
+                end
+            end
+        end
+    end
+    return score, findings
+end
+
+local function spsIdentityChain(inst)
+    local score = 0; local findings = {}
+    local parent = inst.Parent
+    if not parent then return 0, {} end
+    local ok, siblings = pcall(function() return parent:GetChildren() end)
+    if not ok then return 0, {} end
+    for _, sib in ipairs(siblings) do
+        if sib ~= inst and
+           (sib:IsA("BindableEvent") or sib:IsA("BindableFunction")) then
+            score = score + 10
+            table.insert(findings, "bindable:" .. sib.Name)
+        end
+    end
+    local handoffs = { "relay","forward","pass","proxy","bridge","route" }
+    local nl = inst.Name:lower()
+    for _, hw in ipairs(handoffs) do
+        if nl:find(hw, 1, true) then
+            score = score + 8
+            table.insert(findings, "handoff:" .. hw); break
+        end
+    end
+    return score, findings
+end
+
+-- ----------------------------------------------------------------
+--   MAIN SCAN
+-- ----------------------------------------------------------------
+function DAL:staticPreScan(onProgress, onComplete)
+    SPS.results = {}; SPS.lastScan = tick()
+    local paths = {}
+    for path in pairs(self.discovered) do table.insert(paths, path) end
+    if #paths == 0 then if onComplete then onComplete({}) end; return end
+
+    task.spawn(function()
+        for i, path in ipairs(paths) do
+            local rec = self.discovered[path]
+            if rec and rec.inst then
+                local inst = rec.inst; local findings = {}; local axes = {}
+
+                local a1, h1 = spsKeywordScore(inst.Name, SPS_EXEC_KEYWORDS)
+                axes.nameSemantic = math.min(a1, 30)
+                for _, h in ipairs(h1) do
+                    table.insert(findings, "EXEC-KW:" .. h)
+                end
+
+                local a2, anc = spsGetAncestry(inst)
+                axes.ancestry = math.min(a2, 20)
+                if a2 > 0 then
+                    table.insert(findings, "ANCESTRY:" .. anc)
+                end
+
+                local a3, h3 = spsArgShape(inst)
+                axes.argShape = math.min(a3, 20)
+                for _, h in ipairs(h3) do
+                    table.insert(findings, h)
+                end
+
+                local a3b, h3b = spsKeywordScore(inst.Name, SPS_ECONOMY_KEYWORDS)
+                axes.economy = math.min(a3b, 10)
+                for _, h in ipairs(h3b) do
+                    table.insert(findings, "ECON:" .. h)
+                end
+
+                local a4, h4 = spsIdentityChain(inst)
+                axes.identityChain = math.min(a4, 20)
+                for _, h in ipairs(h4) do
+                    table.insert(findings, h)
+                end
+
+                local a5, h5 = spsKeywordScore(inst.Name, SPS_BROADCAST_KEYWORDS)
+                axes.broadcast = math.min(a5, 20)
+                for _, h in ipairs(h5) do
+                    table.insert(findings, "BC:" .. h)
+                end
+
+                local rfBonus = inst:IsA("RemoteFunction") and 5 or 0
+                axes.rfBonus = rfBonus
+                if rfBonus > 0 then
+                    table.insert(findings, "TYPE:RemoteFunction")
+                end
+
+                local score = math.min(
+                    axes.nameSemantic + axes.ancestry + axes.argShape +
+                    axes.economy + axes.identityChain + axes.broadcast +
+                    axes.rfBonus, 100)
+
+                local priority =
+                    score >= 60 and "CRITICAL" or
+                    score >= 35 and "HIGH"     or
+                    score >= 15 and "MEDIUM"   or "LOW"
+
+                local recommended =
+                    axes.nameSemantic >= 14 and "RCE_PROBE" or
+                    score >= 35             and "FUZZ"       or
+                    score >= 15             and "MONITOR"    or "SKIP"
+
+                local spsRec = {
+                    path         = path,
+                    inst         = inst,
+                    score        = score,
+                    rank         = 0,
+                    axes         = axes,
+                    findings     = findings,
+                    priority     = priority,
+                    rceCandidate = (axes.nameSemantic >= 14 or score >= 70),
+                    recommended  = recommended,
+                }
+                table.insert(SPS.results, spsRec)
+
+                DALSink:push({
+                    type     = "SPS",
+                    sev      = priority,
+                    path     = path,
+                    evidence = string.format(
+                        "Score:%d Rec:%s [N:%d A:%d Arg:%d ID:%d BC:%d]",
+                        score, recommended, axes.nameSemantic, axes.ancestry,
+                        axes.argShape, axes.identityChain, axes.broadcast),
+                })
+
+                if onProgress then
+                    onProgress(i, #paths, path, score, recommended)
+                end
+            end
+            task.wait(0)
+        end
+
+        table.sort(SPS.results, function(a, b) return a.score > b.score end)
+        for i, r in ipairs(SPS.results) do r.rank = i end
+
+        -- Auto-log violations for high-confidence findings
+        for _, r in ipairs(SPS.results) do
+            if r.score >= 35 and #r.findings > 0 then
+                local sev = r.priority == "CRITICAL" and SEV.CRITICAL
+                         or r.priority == "HIGH"     and SEV.HIGH
+                         or SEV.MEDIUM
+                local vt = r.rceCandidate and VTYPE.RCE_BOUNDARY
+                        or r.axes.identityChain > 0 and VTYPE.IDENTITY_LOSS
+                        or r.axes.broadcast > 0     and VTYPE.BROADCAST_POISON
+                        or VTYPE.LOGIC_BYPASS
+                self:logViolation(vt, sev, r.path,
+                    "static-pre-scan",
+                    string.format("[SPS #%d | Score %d | %s] %s",
+                        r.rank, r.score, r.recommended,
+                        table.concat(r.findings, " | "):sub(1, 180)),
+                    "SPS-" .. r.rank)
+            end
+        end
+
+        if onComplete then onComplete(SPS.results) end
+    end)
+end
+
+function DAL:getSpsResults() return SPS.results end
+
+function DAL:escalateRceCandidates(onProgress, onComplete)
+    if self.mode ~= 2 then
+        if onComplete then onComplete(0) end; return
+    end
+    local candidates = {}
+    for _, r in ipairs(SPS.results) do
+        if r.recommended == "RCE_PROBE" then
+            table.insert(candidates, r)
+        end
+    end
+    if #candidates == 0 then
+        if onComplete then onComplete(0) end; return
+    end
+    task.spawn(function()
+        for i, r in ipairs(candidates) do
+            if onProgress then onProgress(i, #candidates, r.path) end
+            self:probeRCEBoundary(r.path, nil)
+            task.wait(self.FUZZ_RATE * 2)
+        end
+        if onComplete then onComplete(#candidates) end
+    end)
+end
+
+-- ----------------------------------------------------------------
+--   SPS TAB BUILDER
+-- ----------------------------------------------------------------
+local function buildSpsTab(spsPage, PW, PH)
+    local bar = Instance.new("Frame")
+    bar.Position               = UDim2.fromOffset(0, 0)
+    bar.Size                   = UDim2.fromOffset(PW, 28)
+    bar.BackgroundTransparency = 1
+    bar.BorderSizePixel        = 0
+    bar.ZIndex                 = 52
+    bar.Parent                 = spsPage
+
+    local scanBtn  = mkBtn(bar,  4,  4, 70, 20, "PRE-SCAN",
+        Color3.fromRGB(90,180,255), Color3.fromRGB(90,180,255), 53)
+    local escalBtn = mkBtn(bar, 78,  4, 80, 20, "ESCALATE RCE",
+        Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 53)
+    local statusLbl = mkLabel(bar, 162, 0, PW - 170, 28,
+        "Run PRE-SCAN to rank remotes by attack potential.",
+        7, COL.DIM, Enum.TextXAlignment.Left, 53)
+
+    local scroll = mkScroll(spsPage, 2, 30, PW - 4, PH - 32, 52)
+
+    local function rebuildSps()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+        local results = DAL:getSpsResults()
+        if #results == 0 then
+            local er = mkFrame(scroll, 0, 0, PW - 14, 24,
+                Color3.new(0,0,0), 1, 53)
+            er.LayoutOrder = 1
+            mkLabel(er, 8, 0, PW - 20, 24,
+                "No results. Press PRE-SCAN after crawling.",
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+            scroll.CanvasSize = UDim2.fromOffset(0, 30)
+            return
+        end
+
+        local ROW_H = 54
+        for i, r in ipairs(results) do
+            local pc =
+                r.priority == "CRITICAL" and Color3.fromRGB(228, 60, 80) or
+                r.priority == "HIGH"     and Color3.fromRGB(220,120, 50) or
+                r.priority == "MEDIUM"   and Color3.fromRGB(220,175, 50) or
+                                            Color3.fromRGB( 90,180,255)
+
+            local row = mkFrame(scroll, 0, 0, PW - 14, ROW_H,
+                COL.ROW, 0.30, 53)
+            row.LayoutOrder = i
+            uiCorner(row, 4)
+
+            -- Rank
+            local rkBg = mkFrame(row, 4, (ROW_H-18)/2, 24, 18,
+                pc, 0.65, 54)
+            uiCorner(rkBg, 3)
+            mkLabel(rkBg, 0, 0, 24, 18, "#"..r.rank, 6, pc,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Priority
+            local priBg = mkFrame(row, 32, (ROW_H-13)/2, 52, 13,
+                pc, 0.70, 54)
+            uiCorner(priBg, 3)
+            mkLabel(priBg, 0, 0, 52, 13, r.priority, 6, pc,
+                Enum.TextXAlignment.Center, 55)
+
+            -- RCE flag
+            if r.rceCandidate then
+                local rceBg = mkFrame(row, 88, (ROW_H-13)/2, 32, 13,
+                    Color3.fromRGB(200,40,220), 0.65, 54)
+                uiCorner(rceBg, 3)
+                mkLabel(rceBg, 0, 0, 32, 13, "RCE?", 6,
+                    Color3.fromRGB(200,40,220),
+                    Enum.TextXAlignment.Center, 55)
+            end
+
+            -- Score bar
+            local bw = math.max(1,
+                math.floor((PW - 200) * (r.score / 100)))
+            local sbar = mkFrame(row, 124, (ROW_H-5)/2, bw, 5,
+                pc, 0.50, 54)
+            uiCorner(sbar, 2)
+            mkLabel(row, 124 + bw + 3, (ROW_H-13)/2, 26, 13,
+                tostring(r.score), 7, pc,
+                Enum.TextXAlignment.Left, 54)
+
+            -- Path
+            mkLabel(row, 32, 4, PW - 120, 13,
+                r.path, 7, COL.TEXT,
+                Enum.TextXAlignment.Left, 54)
+
+            -- Top finding
+            mkLabel(row, 32, ROW_H - 17, PW - 120, 12,
+                (r.findings[1] or ""):sub(1, 75), 6,
+                Color3.fromRGB(155,165,200),
+                Enum.TextXAlignment.Left, 54)
+
+            -- Recommendation badge
+            local recCols = {
+                RCE_PROBE=Color3.fromRGB(200,40,220),
+                FUZZ=Color3.fromRGB(220,175,50),
+                MONITOR=Color3.fromRGB(90,180,255),
+                SKIP=Color3.fromRGB(60,70,100),
+            }
+            local rc = recCols[r.recommended] or COL.DIM
+            local rbg = mkFrame(row, PW - 76, (ROW_H-15)/2, 68, 15,
+                rc, 0.68, 54)
+            uiCorner(rbg, 4)
+            mkLabel(rbg, 0, 0, 68, 15, r.recommended, 6, rc,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Click to action
+            local captR = r
+            row.InputBegan:Connect(function(inp)
+                if inp.UserInputType ==
+                   Enum.UserInputType.MouseButton1 then
+                    if captR.recommended == "RCE_PROBE" then
+                        DAL:probeRCEBoundary(captR.path, nil)
+                    elseif captR.recommended == "FUZZ" then
+                        DAL:fuzzRemote(captR.path, nil, nil)
+                    end
+                end
+            end)
+        end
+        scroll.CanvasSize = UDim2.fromOffset(0, #results * (ROW_H + 2))
+    end
+
+    scanBtn.MouseButton1Click:Connect(function()
+        scanBtn.Text = "SCANNING..."
+        local total = 0
+        for _ in pairs(DAL.discovered) do total = total + 1 end
+        statusLbl.Text = "Analysing " .. total .. " remotes..."
+        DAL:staticPreScan(
+            function(i, n, path, score, rec)
+                statusLbl.Text = string.format(
+                    "[%d/%d] %s -> %s (%d)",
+                    i, n, path:match("([^%.]+)$") or path, rec, score)
+            end,
+            function(results)
+                scanBtn.Text = "PRE-SCAN"
+                local rceCount = 0
+                for _, r in ipairs(results) do
+                    if r.rceCandidate then rceCount = rceCount + 1 end
+                end
+                statusLbl.Text = string.format(
+                    "%d ranked. %d RCE candidates. Click row to probe.",
+                    #results, rceCount)
+                rebuildSps()
+            end
+        )
+    end)
+
+    escalBtn.MouseButton1Click:Connect(function()
+        if DAL.mode ~= 2 then
+            statusLbl.Text = "Switch to MODE 2 first."
+            return
+        end
+        escalBtn.Text = "RUNNING..."
+        DAL:escalateRceCandidates(
+            function(i, n, path)
+                statusLbl.Text = string.format(
+                    "RCE [%d/%d]: %s",
+                    i, n, path:match("([^%.]+)$") or path)
+            end,
+            function(count)
+                escalBtn.Text = "ESCALATE RCE"
+                statusLbl.Text = count .. " RCE probes fired. See VIOLATIONS."
+            end
+        )
+    end)
+
+    return rebuildSps
+end
+
 -- ==================================================================
 --   LEVERAGE ENGINE
 --   The core of DAL's purpose: takes a confirmed violation and
