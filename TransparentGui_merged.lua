@@ -11955,7 +11955,7 @@ local function buildStatsBar(root, PW)
     local remNum,  remBlock  = statBlock(6,   "REMOTES\nFOUND",     Color3.fromRGB( 90, 180, 255))
     local violNum, violBlock = statBlock(112, "TOTAL\nVIOLATIONS",  Color3.fromRGB(220, 175,  50))
     local critNum, critBlock = statBlock(218, "CRITICAL+\nFOUND",   Color3.fromRGB(228,  60,  80))
-    local rceNum,  rceBlock  = statBlock(324, "SB-RCE\nCONFIRMED",  Color3.fromRGB(200,  40, 220))
+    local invNum,  invBlock  = statBlock(324, "INVERSIONS\nFOUND",  Color3.fromRGB( 40, 200, 160))
 
     local function pulse(block)
         TweenService:Create(block, TweenInfo.new(0.08), { BackgroundTransparency = 0.40 }):Play()
@@ -11968,17 +11968,20 @@ local function buildStatsBar(root, PW)
         local remCount = 0
         for _ in pairs(DAL.discovered) do remCount = remCount + 1 end
 
-        local violCount, critCount, rceCount = 0, 0, 0
+        local violCount, critCount, invCount = 0, 0, 0
         for _, v in ipairs(DAL.violations) do
             violCount = violCount + 1
             if v.severity.score >= SEV.CRITICAL.score then critCount = critCount + 1 end
-            if v.severity == SEV.RCE then rceCount = rceCount + 1 end
+        end
+        -- Count RSO direction inversions
+        for _, e in ipairs(RSO.events) do
+            if e.inverted then invCount = invCount + 1 end
         end
 
         if remNum.Text  ~= tostring(remCount)  then remNum.Text  = tostring(remCount);  pulse(remBlock)  end
         if violNum.Text ~= tostring(violCount) then violNum.Text = tostring(violCount); pulse(violBlock) end
         if critNum.Text ~= tostring(critCount) then critNum.Text = tostring(critCount); pulse(critBlock) end
-        if rceNum.Text  ~= tostring(rceCount)  then rceNum.Text  = tostring(rceCount);  pulse(rceBlock)  end
+        if invNum.Text  ~= tostring(invCount)  then invNum.Text  = tostring(invCount);  pulse(invBlock)  end
     end
 
     return updateStats
@@ -12015,8 +12018,10 @@ local function buildAlertBanner(root, PW)
     local function trigger(v)
         hideToken = hideToken + 1
         local myToken = hideToken
-        local isRCE = (v.severity.label == "SB-RCE")
-        banner.BackgroundColor3 = isRCE and Color3.fromRGB(200, 40, 220) or Color3.fromRGB(228, 60, 80)
+        local isInversion = (v.vtype == VTYPE.STATE_SPOOF and v.evidence:find("INVERSION"))
+        banner.BackgroundColor3 = isInversion
+            and Color3.fromRGB(40, 200, 160)
+            or  Color3.fromRGB(228, 60, 80)
         lbl.Text = string.format("[!]  %s  --  %s  --  %s",
             v.severity.label, v.vtype, v.remotePath)
         banner.Visible  = true
@@ -12269,23 +12274,23 @@ local function buildPanel(parentGui)
         Enum.TextXAlignment.Left, 52)
 
     -- Mode toggle button
+    -- OBSERVE (1): passive -- RSO watches, PRE-SCAN analyses, no probes fired
+    -- ACTIVE  (2): active  -- FUZZ ALL, RACE probes, concurrent window testing
     local modeColors = {
-        [1] = { bg = Color3.fromRGB( 80,  60, 180), text = Color3.fromRGB(180, 160, 255) },
-        [2] = { bg = Color3.fromRGB(180,  40, 200), text = Color3.fromRGB(255, 160, 255) },
+        [1] = { bg = Color3.fromRGB( 50,  80, 160), text = Color3.fromRGB(140, 180, 255) },
+        [2] = { bg = Color3.fromRGB( 30, 140,  80), text = Color3.fromRGB( 80, 240, 140) },
     }
+    local modeLabels = { [1] = "* OBSERVE", [2] = "* ACTIVE" }
     local modeBtn = mkBtn(hdr, PANEL_W - 90, 7, 82, 18,
-        "* MODE 1",
+        modeLabels[1],
         modeColors[1].bg, modeColors[1].text, 52)
     modeBtn.MouseButton1Click:Connect(function()
         DAL.mode = DAL.mode == 1 and 2 or 1
         local mc = modeColors[DAL.mode]
-        modeBtn.Text           = "* MODE " .. DAL.mode
+        modeBtn.Text             = modeLabels[DAL.mode]
         modeBtn.BackgroundColor3 = mc.bg
         modeBtn.TextColor3       = mc.text
         uiStroke(modeBtn, mc.bg, 0.55, 1)
-        -- Tie the whole panel's border glow to the active mode --
-        -- this is part of what makes it read as a live control
-        -- center rather than a static tool.
         TweenService:Create(rootStroke, TweenInfo.new(0.30), { Color = mc.bg }):Play()
     end)
 
@@ -12856,7 +12861,7 @@ local function buildSpsTab(spsPage, PW, PH)
 
     escalBtn.MouseButton1Click:Connect(function()
         if DAL.mode ~= 2 then
-            statusLbl.Text = "Switch to MODE 2 first."
+            statusLbl.Text = "Switch to ACTIVE mode first."
             return
         end
         escalBtn.Text = "RUNNING..."
@@ -13333,6 +13338,49 @@ end
 -- Expose on DAL table
 DAL.RSO = RSO
 
+-- Race Condition Probe: fires a remote N times inside a tight time window.
+-- Tests whether the server's TOC/TOU gap is wide enough for concurrent
+-- requests to all pass validation before the first commit resolves.
+function DAL:raceProbe(remotePath, reps, windowMs, onComplete)
+    local rec = self.discovered[remotePath]
+    if not rec then
+        if onComplete then onComplete(false, "Remote not discovered") end
+        return
+    end
+    reps     = reps     or 20
+    windowMs = windowMs or 200   -- fire all reps within this many milliseconds
+
+    task.spawn(function()
+        local interval = (windowMs / 1000) / reps   -- seconds between each fire
+        local fired    = 0
+        local start    = tick()
+
+        for i = 1, reps do
+            local ok = pcall(function()
+                if rec.inst:IsA("RemoteEvent") then
+                    rec.inst:FireServer()
+                end
+            end)
+            if ok then fired = fired + 1 end
+            if i < reps then task.wait(interval) end
+        end
+
+        local elapsed = math.floor((tick() - start) * 1000)
+
+        DALSink:push({
+            type     = "RACE",
+            sev      = "HIGH",
+            path     = remotePath,
+            evidence = string.format(
+                "RACE PROBE: %d/%d fires in %dms window (%dms actual). " ..
+                "Watch RSO PROBED filter for concurrent state mutations.",
+                fired, reps, windowMs, elapsed),
+        })
+
+        if onComplete then onComplete(true, fired) end
+    end)
+end
+
 -- ----------------------------------------------------------------
 --   RSO TAB BUILDER
 --   Kept as a separate function to stay under the 200-register cap.
@@ -13457,15 +13505,58 @@ local function buildRsoTab(rsoPage, PW, PH)
             -- Probe tag
             if e.probeRemote then
                 local shortRemote = e.probeRemote:match("([^%.]+)$") or e.probeRemote
-                mkLabel(row, 7, 33, PW - 20, 12,
+                mkLabel(row, 7, 33, PW - 130, 12,
                     "probe: " .. shortRemote,
                     6, Color3.fromRGB(220, 175, 50),
                     Enum.TextXAlignment.Left, 54)
             elseif e.inverted then
-                mkLabel(row, 7, 33, PW - 20, 12,
+                mkLabel(row, 7, 33, PW - 130, 12,
                     "[!] INVERSION -- no probe context (background change)",
                     6, Color3.fromRGB(228, 60, 80),
                     Enum.TextXAlignment.Left, 54)
+            end
+
+            -- Action buttons (right side of row)
+            local btnX = PW - 122
+            -- RACE button -- fires the tagged remote in a tight burst
+            if e.probeRemote and DAL.discovered[e.probeRemote] then
+                local raceBtn = mkBtn(row, btnX, ROW_H - 22, 54, 16,
+                    "RACE x20",
+                    Color3.fromRGB(220, 120, 40),
+                    Color3.fromRGB(220, 120, 40), 55)
+                local captRemote = e.probeRemote
+                raceBtn.MouseButton1Click:Connect(function()
+                    raceBtn.Text = "FIRING..."
+                    DAL:raceProbe(captRemote, 20, 200, function(ok, fired)
+                        raceBtn.Text = ok
+                            and (tostring(fired) .. " fired")
+                            or  "FAILED"
+                        task.delay(2, function() raceBtn.Text = "RACE x20" end)
+                    end)
+                end)
+                btnX = btnX + 58
+            end
+
+            -- LEVERAGE button -- opens leverage panel for the closest violation
+            if e.inverted then
+                local levBtn = mkBtn(row, btnX, ROW_H - 22, 56, 16,
+                    "LEVERAGE",
+                    Color3.fromRGB(200, 40, 220),
+                    Color3.fromRGB(200, 40, 220), 55)
+                local captE = e
+                levBtn.MouseButton1Click:Connect(function()
+                    -- Find the matching violation or synthesise one
+                    local matchV = nil
+                    for _, v in ipairs(DAL.violations) do
+                        if captE.probeRemote and v.remotePath == captE.probeRemote then
+                            matchV = v; break
+                        end
+                    end
+                    if matchV then
+                        local report = DAL:getLeverageReport(matchV)
+                        DAL.showLeveragePanel(rsoPage.Parent, matchV, report)
+                    end
+                end)
             end
         end
 
