@@ -11660,21 +11660,22 @@ local function buildRemotesTab(remPage, PW, PH, switchTab)
 
             local fb = mkBtn(row, PW - 76, 5, 34, 14, "FUZZ",
                 Color3.fromRGB(220,175,50), Color3.fromRGB(220,175,50), 54)
-            local rb = mkBtn(row, PW - 38, 5, 30, 14, "RCE",
-                Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 54)
+            local rb = mkBtn(row, PW - 38, 5, 30, 14, "RACE",
+                Color3.fromRGB(220,120,40), Color3.fromRGB(220,120,40), 54)
 
             local captPath = path
             fb.MouseButton1Click:Connect(function()
                 fb.Text = "..."
                 DAL:fuzzRemote(captPath, nil, function()
                     fb.Text = "[OK]"
+                    task.delay(2, function() fb.Text = "FUZZ" end)
                 end)
             end)
             rb.MouseButton1Click:Connect(function()
                 rb.Text = "..."
-                DAL:probeRCEBoundary(captPath, function()
-                    rb.Text = "[OK]"
-                    switchTab(2)
+                DAL:raceProbe(captPath, 20, 200, function(ok, fired)
+                    rb.Text = ok and (tostring(fired) .. "x") or "[!]"
+                    task.delay(2, function() rb.Text = "RACE" end)
                 end)
             end)
         end
@@ -11973,8 +11974,11 @@ local function buildStatsBar(root, PW)
             violCount = violCount + 1
             if v.severity.score >= SEV.CRITICAL.score then critCount = critCount + 1 end
         end
-        -- Count RSO direction inversions
-        for _, e in ipairs(RSO.events) do
+        -- Count RSO direction inversions via DAL.RSO (RSO is declared later
+        -- in the IIFE so it isn't in scope here; DAL.RSO is set after RSO
+        -- is created and is always the correct live reference)
+        local rsoEvents = DAL.RSO and DAL.RSO.events or {}
+        for _, e in ipairs(rsoEvents) do
             if e.inverted then invCount = invCount + 1 end
         end
 
@@ -12823,9 +12827,9 @@ local function buildSpsTab(spsPage, PW, PH)
             row.InputBegan:Connect(function(inp)
                 if inp.UserInputType ==
                    Enum.UserInputType.MouseButton1 then
-                    if captR.recommended == "RCE_PROBE" then
-                        DAL:probeRCEBoundary(captR.path, nil)
-                    elseif captR.recommended == "FUZZ" then
+                    if captR.recommended == "RCE_PROBE"
+                       or captR.recommended == "FUZZ" then
+                        DAL:raceProbe(captR.path, 20, 200, nil)
                         DAL:fuzzRemote(captR.path, nil, nil)
                     end
                 end
