@@ -12320,6 +12320,7 @@ local function buildPanel(parentGui)
         { label = "PRE-SCAN",   accent = Color3.fromRGB( 40, 180, 120) },
         { label = "RSO",        accent = Color3.fromRGB( 40, 200, 160) },
         { label = "MLID",       accent = Color3.fromRGB(228,  60,  80) },
+        { label = "CPWM",       accent = Color3.fromRGB(220, 120,  40) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -12381,6 +12382,7 @@ local function buildPanel(parentGui)
     DAL.buildSpsTab(pages[6], PW, PH)
     DAL.buildRsoTab(pages[7], PW, PH)
     DAL.buildMlidTab(pages[8], PW, PH)
+    DAL.buildCpwmTab(pages[9], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -14211,6 +14213,463 @@ local function buildMlidTab(mlidPage, PW, PH)
 end
 
 -- ==================================================================
+--   CONCURRENT PROBE WINDOW MANAGER  (CPWM)
+--
+--   The TOC/TOU (Time-of-Check to Time-of-Use) vulnerability lives
+--   in the gap between when the server validates state and when it
+--   commits the result. If that gap is wide enough for multiple
+--   concurrent requests to all pass validation before the first
+--   commit resolves, the player pays the cost once but receives
+--   the reward multiple times.
+--
+--   CPWM measures this gap directly:
+--     1. BASELINE  -- fire one shot, record the single-request delta
+--     2. BURST     -- fire N shots within a configurable ms window
+--     3. MULTIPLIER-- burst_delta / single_delta = how many concurrent
+--                     requests cleared the check before first commit
+--     4. VERDICT   -- OPEN (>= 2x), NARROW (>= 1.3x), CLOSED (< 1.3x)
+--
+--   Window width estimate:
+--     If M of N shots cleared the check in a W-ms window,
+--     the TOC/TOU gap is at least (W / N) * M milliseconds wide.
+-- ==================================================================
+
+local CPWM = {
+    findings   = {},
+    MAX_F      = 200,
+    isRunning  = false,
+    onFinding  = nil,
+}
+
+local CPWM_OPEN_THRESHOLD   = 2.0
+local CPWM_NARROW_THRESHOLD = 1.3
+
+local CPWM_STATUS_SEV = {
+    OPEN         = SEV.CRITICAL,
+    NARROW       = SEV.HIGH,
+    CLOSED       = SEV.LOW,
+    UNMEASURABLE = SEV.INFO,
+}
+
+local CPWM_STATUS_REC = {
+    OPEN =
+        "TOC/TOU window is OPEN. Multiple concurrent requests " ..
+        "cleared the validation check before the first commit. " ..
+        "Exploit by firing the remote rapidly (~20 shots in " ..
+        "200ms). Each shot that clears validation before commit " ..
+        "produces a free reward cycle. Combine with RACE x20.",
+    NARROW =
+        "TOC/TOU window exists but is tight. Exploitation " ..
+        "requires precise timing or a faster connection. " ..
+        "Increase burst size (50+ shots) or reduce window to " ..
+        "concentrate fire within the check-to-commit gap.",
+    CLOSED =
+        "Server commits fast enough to block concurrent requests. " ..
+        "No exploitable window detected at this burst count and " ..
+        "window size. Try larger bursts or test under higher " ..
+        "server load conditions.",
+    UNMEASURABLE =
+        "Single-shot produced no observable numeric state change. " ..
+        "This remote may not affect client-visible properties, " ..
+        "or the change is server-internal only.",
+}
+
+-- ----------------------------------------------------------------
+--   SINGLE TEST
+-- ----------------------------------------------------------------
+function DAL:cpwmTest(remotePath, shots, windowMs, onComplete)
+    local rec = self.discovered[remotePath]
+    if not rec or not rec.inst then
+        if onComplete then onComplete(nil, "Remote not discovered") end
+        return
+    end
+    shots    = shots    or 20
+    windowMs = windowMs or 200
+
+    task.spawn(function()
+        -- Phase 1: single-shot baseline
+        local snapA = mlidSnapshot()
+        pcall(function()
+            if rec.inst:IsA("RemoteEvent") then
+                rec.inst:FireServer()
+            end
+        end)
+        task.wait(0.50)
+        local snapB       = mlidSnapshot()
+        local baseChanges = mlidDiff(snapA, snapB)
+
+        -- Largest single numeric delta
+        local singleDelta = 0
+        local trackedProp = nil
+        for _, ch in ipairs(baseChanges) do
+            if math.abs(ch.delta) > math.abs(singleDelta) then
+                singleDelta = ch.delta
+                trackedProp = ch.key
+            end
+        end
+
+        -- Unmeasurable: no observable numeric change
+        if math.abs(singleDelta) < 0.01 then
+            local f = {
+                ts=tick(), remotePath=remotePath,
+                shots=shots, windowMs=windowMs,
+                singleDelta=0, burstDelta=0,
+                multiplier=0, passCount=0, windowEstMs=0,
+                property=trackedProp or "none",
+                status="UNMEASURABLE",
+                severity=CPWM_STATUS_SEV.UNMEASURABLE,
+                recommendation=CPWM_STATUS_REC.UNMEASURABLE,
+            }
+            table.insert(CPWM.findings, 1, f)
+            if CPWM.onFinding then CPWM.onFinding(f) end
+            if onComplete then onComplete(f, nil) end
+            return
+        end
+
+        -- Phase 2: burst fire
+        local snapC    = mlidSnapshot()
+        local interval = (windowMs / 1000) / shots
+        local fired    = 0
+
+        for i = 1, shots do
+            pcall(function()
+                if rec.inst:IsA("RemoteEvent") then
+                    rec.inst:FireServer()
+                    fired = fired + 1
+                end
+            end)
+            if i < shots then task.wait(interval) end
+        end
+
+        task.wait(0.60)
+        local snapD       = mlidSnapshot()
+        local burstChanges = mlidDiff(snapC, snapD)
+
+        local burstDelta = 0
+        for _, ch in ipairs(burstChanges) do
+            if ch.key == trackedProp then
+                burstDelta = ch.delta; break
+            end
+        end
+
+        local multiplier = math.abs(singleDelta) > 0.01
+            and (math.abs(burstDelta) / math.abs(singleDelta)) or 0
+        local passCount  = math.max(1, math.floor(multiplier + 0.5))
+        local winEst     = passCount > 1
+            and math.floor((windowMs / shots) * passCount) or 0
+
+        local status =
+            multiplier >= CPWM_OPEN_THRESHOLD   and "OPEN"   or
+            multiplier >= CPWM_NARROW_THRESHOLD  and "NARROW" or
+            "CLOSED"
+
+        local sev = CPWM_STATUS_SEV[status]
+
+        local finding = {
+            ts=tick(), remotePath=remotePath,
+            shots=shots, windowMs=windowMs,
+            singleDelta=singleDelta, burstDelta=burstDelta,
+            multiplier=multiplier, passCount=passCount,
+            windowEstMs=winEst, property=trackedProp,
+            status=status, severity=sev,
+            recommendation=CPWM_STATUS_REC[status],
+        }
+
+        table.insert(CPWM.findings, 1, finding)
+        if #CPWM.findings > CPWM.MAX_F then
+            table.remove(CPWM.findings)
+        end
+
+        if status == "OPEN" or status == "NARROW" then
+            self:logViolation(
+                VTYPE.RACE_PRECOND, sev, remotePath,
+                shots .. "shots/" .. windowMs .. "ms",
+                string.format(
+                    "[CPWM %s] x%.2f multiplier. %d/%d shots passed. " ..
+                    "Est. window %dms. %s: single %.2f burst %.2f",
+                    status, multiplier, passCount, shots,
+                    winEst, trackedProp or "?",
+                    singleDelta, burstDelta),
+                "CPWM")
+        end
+
+        DALSink:push({
+            type="CPWM", sev=sev.label, path=remotePath,
+            evidence=string.format(
+                "%s x%.2f (%d/%d) est.%dms",
+                status, multiplier, passCount, shots, winEst),
+        })
+
+        if CPWM.onFinding then CPWM.onFinding(finding) end
+        if onComplete then onComplete(finding, nil) end
+    end)
+end
+
+function DAL:cpwmSweep(shots, windowMs, onProgress, onComplete)
+    if CPWM.isRunning then
+        if onComplete then onComplete({}) end; return
+    end
+    CPWM.isRunning = true
+
+    local targets = {}
+    for _, r in ipairs(SPS.results) do
+        if r.axes and r.axes.economy and r.axes.economy > 0 then
+            table.insert(targets, r.path)
+        end
+    end
+    if #targets == 0 then
+        for path in pairs(self.discovered) do
+            table.insert(targets, path)
+        end
+    end
+
+    local allFindings = {}
+    local idx = 0
+    local function next()
+        idx = idx + 1
+        if idx > #targets then
+            CPWM.isRunning = false
+            if onComplete then onComplete(allFindings) end
+            return
+        end
+        local path = targets[idx]
+        if onProgress then onProgress(idx, #targets, path) end
+        self:cpwmTest(path, shots, windowMs, function(finding)
+            if finding then table.insert(allFindings, finding) end
+            task.wait(0.5); next()
+        end)
+    end
+    next()
+end
+
+function DAL:getCpwmFindings() return CPWM.findings end
+
+-- ----------------------------------------------------------------
+--   CPWM TAB BUILDER
+-- ----------------------------------------------------------------
+local function buildCpwmTab(cpwmPage, PW, PH)
+    local STATUS_COL = {
+        OPEN         = Color3.fromRGB(228,  60,  80),
+        NARROW       = Color3.fromRGB(220, 120,  40),
+        CLOSED       = Color3.fromRGB( 90, 180, 255),
+        UNMEASURABLE = Color3.fromRGB( 80,  90, 120),
+    }
+    local cfg = { shots = 20, windowMs = 200 }
+
+    -- Toolbar
+    local bar = mkFrame(cpwmPage, 0, 0, PW, 28,
+        Color3.new(0,0,0), 1, 52)
+    local testBtn  = mkBtn(bar,  4,  4, 76, 20, "TEST REMOTE",
+        Color3.fromRGB(40,160,80), Color3.fromRGB(40,160,80), 53)
+    local sweepBtn = mkBtn(bar, 84,  4, 68, 20, "SWEEP ECON",
+        Color3.fromRGB(220,175,50), Color3.fromRGB(220,175,50), 53)
+    local clearBtn = mkBtn(bar,156,  4, 46, 20, "CLEAR",
+        Color3.fromRGB(80,90,120), Color3.fromRGB(160,170,200), 53)
+
+    -- Shot presets
+    local spX = 206
+    mkLabel(bar, spX, 0, 36, 28, "SHOTS:", 6, COL.DIM,
+        Enum.TextXAlignment.Left, 53)
+    spX = spX + 34
+    for _, n in ipairs({ 5, 10, 20, 50 }) do
+        local sb = mkBtn(bar, spX, 5, 24, 18, tostring(n),
+            Color3.fromRGB(60,80,160), Color3.fromRGB(140,160,255), 53)
+        sb.BackgroundTransparency = (n==cfg.shots) and 0.35 or 0.72
+        local cn = n
+        sb.MouseButton1Click:Connect(function() cfg.shots = cn end)
+        spX = spX + 28
+    end
+
+    -- Window presets
+    mkLabel(bar, spX+2, 0, 30, 28, "WIN:", 6, COL.DIM,
+        Enum.TextXAlignment.Left, 53)
+    spX = spX + 30
+    for _, w in ipairs({ 100, 200, 500 }) do
+        local wb = mkBtn(bar, spX, 5, 34, 18, tostring(w).."ms",
+            Color3.fromRGB(40,100,160), Color3.fromRGB(100,180,255), 53)
+        wb.BackgroundTransparency = (w==cfg.windowMs) and 0.35 or 0.72
+        local cw = w
+        wb.MouseButton1Click:Connect(function() cfg.windowMs = cw end)
+        spX = spX + 38
+    end
+
+    -- Info strip
+    local info = mkFrame(cpwmPage, 0, 28, PW, 16,
+        Color3.fromRGB(10,12,22), 0.60, 52)
+    local infoLbl = mkLabel(info, 6, 0, PW-12, 16,
+        "Configure shots + window, then TEST REMOTE or SWEEP ECON.",
+        7, COL.DIM, Enum.TextXAlignment.Left, 53)
+
+    local scroll = mkScroll(cpwmPage, 2, 46, PW-4, PH-48, 52)
+
+    local function rebuildCpwm()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+        local findings = DAL:getCpwmFindings()
+        if #findings == 0 then
+            local er = mkFrame(scroll, 0, 0, PW-14, 24,
+                Color3.new(0,0,0), 1, 53)
+            er.LayoutOrder = 1
+            mkLabel(er, 8, 0, PW-20, 24,
+                "No results. Press TEST REMOTE or SWEEP ECON.",
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+            scroll.CanvasSize = UDim2.fromOffset(0, 30)
+            return
+        end
+
+        local ROW_H = 68
+        local openC, narrowC = 0, 0
+        for i, f in ipairs(findings) do
+            local stCol = STATUS_COL[f.status] or COL.DIM
+            local row = mkFrame(scroll, 0, 0, PW-14, ROW_H,
+                COL.ROW, 0.28, 53)
+            row.LayoutOrder = i; uiCorner(row, 4)
+
+            mkFrame(row, 0, 0, 3, ROW_H, stCol, 0.0, 54)
+
+            local stBg = mkFrame(row, 7, 5, 72, 16, stCol, 0.65, 54)
+            uiCorner(stBg, 4)
+            mkLabel(stBg, 0, 0, 72, 16, f.status, 7, stCol,
+                Enum.TextXAlignment.Center, 55)
+
+            local multCol =
+                f.multiplier >= CPWM_OPEN_THRESHOLD
+                    and Color3.fromRGB(228,60,80) or
+                f.multiplier >= CPWM_NARROW_THRESHOLD
+                    and Color3.fromRGB(220,120,40) or COL.DIM
+            mkLabel(row, PW-80, 4, 66, 18,
+                string.format("x%.2f", f.multiplier),
+                12, multCol, Enum.TextXAlignment.Right, 54)
+
+            mkLabel(row, 83, 4, PW-170, 14,
+                f.remotePath:match("([^%.]+%.[^%.]+)$") or f.remotePath,
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+
+            mkLabel(row, 7, 23, PW-20, 12,
+                string.format("%d shots / %dms window",
+                    f.shots, f.windowMs),
+                6, COL.DIM, Enum.TextXAlignment.Left, 54)
+
+            mkLabel(row, 7, 36, PW-20, 13,
+                string.format(
+                    "%s: single %+.2f  burst %+.2f  |  " ..
+                    "%d/%d passed  |  est. %dms window",
+                    (f.property or "?"):match("([^:]+)$") or "?",
+                    f.singleDelta, f.burstDelta,
+                    f.passCount, f.shots, f.windowEstMs),
+                7, Color3.fromRGB(175,190,220),
+                Enum.TextXAlignment.Left, 54)
+
+            local repBtn  = mkBtn(row, 7,   ROW_H-20, 52, 16, "REPEAT",
+                Color3.fromRGB(90,180,255), Color3.fromRGB(90,180,255), 55)
+            local raceBtn = mkBtn(row, 63,  ROW_H-20, 58, 16, "RACE x20",
+                Color3.fromRGB(220,120,40), Color3.fromRGB(220,120,40), 55)
+            local levBtn  = mkBtn(row, 125, ROW_H-20, 56, 16, "LEVERAGE",
+                Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 55)
+
+            local captF = f
+            repBtn.MouseButton1Click:Connect(function()
+                repBtn.Text = "..."
+                DAL:cpwmTest(captF.remotePath,
+                    captF.shots, captF.windowMs,
+                    function() repBtn.Text="REPEAT"; rebuildCpwm() end)
+            end)
+            raceBtn.MouseButton1Click:Connect(function()
+                raceBtn.Text = "..."
+                DAL:raceProbe(captF.remotePath, 20, 200,
+                    function(ok, fired)
+                        raceBtn.Text = ok and (tostring(fired).."x") or "[!]"
+                        task.delay(2, function() raceBtn.Text="RACE x20" end)
+                    end)
+            end)
+            levBtn.MouseButton1Click:Connect(function()
+                for _, v in ipairs(DAL.violations) do
+                    if v.remotePath == captF.remotePath then
+                        local rpt = DAL:getLeverageReport(v)
+                        DAL.showLeveragePanel(cpwmPage.Parent, v, rpt)
+                        return
+                    end
+                end
+            end)
+
+            if f.status=="OPEN"   then openC  = openC  + 1 end
+            if f.status=="NARROW" then narrowC = narrowC + 1 end
+        end
+
+        scroll.CanvasSize = UDim2.fromOffset(0, #findings*(ROW_H+2))
+        infoLbl.Text = string.format(
+            "%d tests  |  %d OPEN windows  |  %d NARROW",
+            #findings, openC, narrowC)
+    end
+
+    CPWM.onFinding = function() rebuildCpwm() end
+
+    testBtn.MouseButton1Click:Connect(function()
+        local target = nil
+        if #SPS.results > 0 then
+            target = SPS.results[1].path
+        else
+            local best = -1
+            for path, rec in pairs(DAL.discovered) do
+                if rec.probeCount > best then
+                    best=rec.probeCount; target=path
+                end
+            end
+        end
+        if not target then
+            infoLbl.Text = "No remotes found. Run CRAWL first."
+            return
+        end
+        testBtn.Text = "TESTING..."
+        infoLbl.Text = string.format("Testing %s (%d shots/%dms)...",
+            target:match("([^%.]+)$") or target,
+            cfg.shots, cfg.windowMs)
+        DAL:cpwmTest(target, cfg.shots, cfg.windowMs,
+            function(finding)
+                testBtn.Text = "TEST REMOTE"
+                if finding then
+                    infoLbl.Text = string.format(
+                        "Done. %s  x%.2f",
+                        finding.status, finding.multiplier)
+                end
+                rebuildCpwm()
+            end)
+    end)
+
+    sweepBtn.MouseButton1Click:Connect(function()
+        if CPWM.isRunning then return end
+        sweepBtn.Text = "SWEEPING..."
+        DAL:cpwmSweep(cfg.shots, cfg.windowMs,
+            function(i, total, path)
+                infoLbl.Text = string.format("[%d/%d] %s",
+                    i, total, path:match("([^%.]+)$") or path)
+            end,
+            function(findings)
+                sweepBtn.Text = "SWEEP ECON"
+                local openC = 0
+                for _, f in ipairs(findings) do
+                    if f.status=="OPEN" then openC = openC+1 end
+                end
+                infoLbl.Text = string.format(
+                    "Done. %d tested. %d OPEN windows.",
+                    #findings, openC)
+                rebuildCpwm()
+            end)
+    end)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        CPWM.findings = {}
+        rebuildCpwm()
+        infoLbl.Text = "Cleared."
+    end)
+
+    rebuildCpwm()
+    return rebuildCpwm
+end
+
+
+-- ==================================================================
 --   LEVERAGE ENGINE
 --   The core of DAL's purpose: takes a confirmed violation and
 --   answers three questions:
@@ -14847,6 +15306,7 @@ DAL.buildLeverageTab = buildLeverageTab
 DAL.buildSpsTab      = buildSpsTab
 DAL.buildRsoTab      = buildRsoTab
 DAL.buildMlidTab     = buildMlidTab
+DAL.buildCpwmTab     = buildCpwmTab
 
     return DAL
 end)()
