@@ -13338,17 +13338,17 @@ DAL.RSO = RSO
 --   Kept as a separate function to stay under the 200-register cap.
 -- ----------------------------------------------------------------
 local function buildRsoTab(rsoPage, PW, PH)
-    -- Toolbar
+    -- Toolbar row 1 -- controls
     local bar = Instance.new("Frame")
-    bar.Size               = UDim2.fromOffset(PW, 30)
+    bar.Size               = UDim2.fromOffset(PW, 28)
     bar.BackgroundTransparency = 1
     bar.BorderSizePixel    = 0
     bar.ZIndex             = 52
     bar.Parent             = rsoPage
 
-    local toggleBtn = mkBtn(bar, 4, 4, 64, 22, "START RSO",
+    local toggleBtn = mkBtn(bar, 4, 4, 64, 20, "START RSO",
         Color3.fromRGB(40, 160, 80), Color3.fromRGB(40, 160, 80), 53)
-    local clearBtn  = mkBtn(bar, 72, 4, 48, 22, "CLEAR",
+    local clearBtn  = mkBtn(bar, 72, 4, 48, 20, "CLEAR",
         Color3.fromRGB(80, 90, 120), Color3.fromRGB(160, 170, 200), 53)
 
     -- Filter buttons
@@ -13362,32 +13362,33 @@ local function buildRsoTab(rsoPage, PW, PH)
     local filterBtns   = {}
     local filterX = 124
     for _, f in ipairs(filters) do
-        local fb = mkBtn(bar, filterX, 4, 64, 22, f,
+        local fb = mkBtn(bar, filterX, 4, 64, 20, f,
             filterCols[f], filterCols[f], 53)
         filterBtns[f] = fb
         filterX = filterX + 68
     end
 
-    -- Stats labels
-    local watchLbl = mkLabel(bar, PW - 140, 0, 134, 30,
-        "0 watching", 7, COL.DIM, Enum.TextXAlignment.Right, 53)
-    local totalLbl = mkLabel(bar, PW - 140, 0, 134, 30,
-        "", 7, COL.DIM, Enum.TextXAlignment.Right, 53)
+    -- Toolbar row 2 -- stats info strip (separate row, no overlap possible)
+    local infoBar = mkFrame(rsoPage, 0, 28, PW, 16,
+        Color3.fromRGB(10, 12, 22), 0.60, 52)
+    local watchLbl = mkLabel(infoBar, 6, 0, PW - 12, 16,
+        "Not active -- press START RSO to begin watching.",
+        7, COL.DIM, Enum.TextXAlignment.Left, 53)
 
-    -- Scroll
-    local scroll = mkScroll(rsoPage, 2, 32, PW - 4, PH - 34, 52)
+    -- Scroll (starts below both toolbar rows)
+    local scroll = mkScroll(rsoPage, 2, 46, PW - 4, PH - 48, 52)
 
     local function updateStats()
         local all  = #RSO.events
         local inv  = 0
         local prob = 0
         for _, e in ipairs(RSO.events) do
-            if e.inverted then inv = inv + 1 end
+            if e.inverted then inv  = inv  + 1 end
             if e.probeId  then prob = prob + 1 end
         end
         watchLbl.Text = string.format(
-            "%d watching  |  %d events  |  %d inverted",
-            RSO.watchCount, all, inv)
+            "%d watching  |  %d events  |  %d probed  |  %d inverted",
+            RSO.watchCount, all, prob, inv)
     end
 
     local function rebuildRso()
