@@ -12319,6 +12319,7 @@ local function buildPanel(parentGui)
         { label = "LEVERAGE",   accent = Color3.fromRGB(200,  40, 220) },
         { label = "PRE-SCAN",   accent = Color3.fromRGB( 40, 180, 120) },
         { label = "RSO",        accent = Color3.fromRGB( 40, 200, 160) },
+        { label = "MLID",       accent = Color3.fromRGB(228,  60,  80) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -12379,6 +12380,7 @@ local function buildPanel(parentGui)
     DAL.buildLeverageTab(pages[5], PW, PH, switchTab)
     DAL.buildSpsTab(pages[6], PW, PH)
     DAL.buildRsoTab(pages[7], PW, PH)
+    DAL.buildMlidTab(pages[8], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -13622,6 +13624,593 @@ local function buildRsoTab(rsoPage, PW, PH)
 end
 
 -- ==================================================================
+--   MATH LOGIC INVERSION DETECTOR  (MLID)
+--
+--   Where RSO passively watches property changes, MLID actively
+--   probes a specific remote with edge-case mathematical payloads
+--   and classifies what each mutation does to server-side numeric
+--   state.
+--
+--   The four findings MLID can produce:
+--
+--     INVERSION      -- remote implied DECREASE, mutation caused
+--                       INCREASE. The math ran backward.
+--                       Direct exploitation: send this payload to
+--                       gain value instead of losing it.
+--
+--     UNEXPECTED_GAIN -- remote had no semantic direction, but a
+--                        mutation caused a significant positive
+--                        change in a tracked property.
+--
+--     AMPLIFICATION  -- mutation caused a change far larger than
+--                       any nominal delta. Server arithmetic
+--                       overflowed or became unbounded.
+--
+--     NULLIFICATION  -- a mutation stopped an expected change from
+--                       happening. The deduction thread crashed
+--                       mid-execution, bypassing the cost.
+--
+--     TYPE_CRASH     -- the mutation caused no observable state
+--                       change but RSO detected a server-side
+--                       exception pattern (silent fail).
+--
+--   Each finding gets a severity, a concrete payload, and a
+--   specific recommendation for how to use it.
+-- ==================================================================
+
+-- ----------------------------------------------------------------
+--   MLID MUTATION LIBRARY
+--   Focused on mathematical edge cases that break Luau arithmetic.
+-- ----------------------------------------------------------------
+local MLID_MUTATIONS = {
+    { label = "NaN (0/0)",        payload = 0/0,         mtype = "TYPE_CONFUSION" },
+    { label = "Infinity",         payload = math.huge,   mtype = "TYPE_CONFUSION" },
+    { label = "Neg-Infinity",     payload = -math.huge,  mtype = "TYPE_CONFUSION" },
+    { label = "Negative (-1)",    payload = -1,          mtype = "NEGATIVE"       },
+    { label = "Negative (-9999)", payload = -9999,       mtype = "NEGATIVE"       },
+    { label = "Zero (0)",         payload = 0,           mtype = "BOUNDARY"       },
+    { label = "Neg float",        payload = -0.001,      mtype = "BOUNDARY"       },
+    { label = "Overflow (2^53)",  payload = 2^53,        mtype = "OVERFLOW"       },
+    { label = "Max int32",        payload = 2147483647,  mtype = "OVERFLOW"       },
+    { label = "Bool true",        payload = true,        mtype = "TYPE_CONFUSION" },
+    { label = "Bool false",       payload = false,       mtype = "TYPE_CONFUSION" },
+    { label = "Empty table",      payload = {},          mtype = "TYPE_CONFUSION" },
+    { label = "String number",    payload = "999999",    mtype = "TYPE_CONFUSION" },
+    { label = "String negative",  payload = "-1",        mtype = "TYPE_CONFUSION" },
+    { label = "String nan",       payload = "nan",       mtype = "TYPE_CONFUSION" },
+}
+
+-- ----------------------------------------------------------------
+--   MLID CLASSIFICATION
+-- ----------------------------------------------------------------
+local MLID_CLASS = {
+    INVERSION       = "INVERSION",
+    UNEXPECTED_GAIN = "UNEXPECTED_GAIN",
+    AMPLIFICATION   = "AMPLIFICATION",
+    NULLIFICATION   = "NULLIFICATION",
+    TYPE_CRASH      = "TYPE_CRASH",
+    NONE            = "NONE",
+}
+
+local MLID_CLASS_SEV = {
+    INVERSION       = SEV.CRITICAL,
+    UNEXPECTED_GAIN = SEV.HIGH,
+    AMPLIFICATION   = SEV.HIGH,
+    NULLIFICATION   = SEV.MEDIUM,
+    TYPE_CRASH      = SEV.MEDIUM,
+    NONE            = SEV.INFO,
+}
+
+local MLID_CLASS_REC = {
+    INVERSION =
+        "Math runs BACKWARD with this payload. Send it to gain " ..
+        "value instead of losing it. Combine with RACE x20 to " ..
+        "multiply the effect before the server corrects state.",
+    UNEXPECTED_GAIN =
+        "Server granted value without a valid cost payload. " ..
+        "Confirm by repeating -- if consistent, this is a free " ..
+        "resource exploit.",
+    AMPLIFICATION =
+        "Arithmetic overflowed or became unbounded. The player " ..
+        "may receive far more than the developer intended. " ..
+        "Test with graduated values to find the overflow cliff.",
+    NULLIFICATION =
+        "The deduction thread crashed mid-execution. The cost " ..
+        "was never applied but downstream logic (item grant, " ..
+        "state update) may have continued. Check RSO for " ..
+        "partial state changes.",
+    TYPE_CRASH =
+        "Handler thread failed silently. No state change observed " ..
+        "but the server did not reject the payload either. Map " ..
+        "whether any downstream module still executed.",
+    NONE = "No exploitable deviation detected for this payload.",
+}
+
+-- ----------------------------------------------------------------
+--   MLID STATE
+-- ----------------------------------------------------------------
+local MLID = {
+    findings   = {},   -- array of MlidFinding, newest first
+    MAX_F      = 400,
+    isRunning  = false,
+    onFinding  = nil,  -- UI callback
+}
+
+-- ----------------------------------------------------------------
+--   SNAPSHOT HELPERS (lightweight, independent of RSO)
+-- ----------------------------------------------------------------
+local function mlidSnapshot()
+    local snap = { ts = tick(), vals = {} }
+    local lp   = Players.LocalPlayer
+
+    -- Leaderstats
+    local ls = lp:FindFirstChild("leaderstats")
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            if v:IsA("NumberValue") or v:IsA("IntValue") then
+                snap.vals["ls:" .. v.Name] = v.Value
+            end
+        end
+    end
+
+    -- Character humanoid
+    local char = lp.Character
+    if char then
+        local h = char:FindFirstChildOfClass("Humanoid")
+        if h then
+            snap.vals["hum:Health"]    = h.Health
+            snap.vals["hum:WalkSpeed"] = h.WalkSpeed
+            snap.vals["hum:JumpPower"] = h.JumpPower
+        end
+    end
+
+    -- Player attributes
+    local ok, attrs = pcall(function() return lp:GetAttributes() end)
+    if ok then
+        for k, v in pairs(attrs) do
+            if type(v) == "number" then
+                snap.vals["attr:" .. k] = v
+            end
+        end
+    end
+
+    return snap
+end
+
+local function mlidDiff(before, after)
+    local changes = {}
+    for k, bv in pairs(before.vals) do
+        local av = after.vals[k]
+        if type(bv) == "number" and type(av) == "number" and av ~= bv then
+            table.insert(changes, {
+                key   = k,
+                before = bv,
+                after  = av,
+                delta  = av - bv,
+            })
+        end
+    end
+    for k, av in pairs(after.vals) do
+        if before.vals[k] == nil and type(av) == "number" then
+            table.insert(changes, {
+                key    = k,
+                before = 0,
+                after  = av,
+                delta  = av,
+            })
+        end
+    end
+    return changes
+end
+
+-- ----------------------------------------------------------------
+--   CLASSIFY ONE MUTATION RESULT
+-- ----------------------------------------------------------------
+local function mlidClassify(mutation, changes, remoteName, baselineDeltas)
+    if #changes == 0 then
+        -- No observable change -- type crash or null effect
+        return MLID_CLASS.TYPE_CRASH, nil
+    end
+
+    local expectedDir = nil
+    local rn = remoteName:lower()
+    for _, v in ipairs(RSO_DECREASE_VERBS) do
+        if rn:find(v, 1, true) then expectedDir = "DECREASE"; break end
+    end
+    if not expectedDir then
+        for _, v in ipairs(RSO_INCREASE_VERBS) do
+            if rn:find(v, 1, true) then expectedDir = "INCREASE"; break end
+        end
+    end
+
+    local worstClass = MLID_CLASS.NONE
+    local worstChange = nil
+
+    for _, ch in ipairs(changes) do
+        local cls = MLID_CLASS.NONE
+        local baselineDelta = baselineDeltas[ch.key] or 0
+
+        -- INVERSION: direction flipped from expected
+        if expectedDir == "DECREASE" and ch.delta > 0 then
+            cls = MLID_CLASS.INVERSION
+        elseif expectedDir == "INCREASE" and ch.delta < 0 then
+            cls = MLID_CLASS.INVERSION
+        -- NULLIFICATION: baseline changed but mutation didn't
+        elseif math.abs(baselineDelta) > 0.5 and math.abs(ch.delta) < 0.1 then
+            cls = MLID_CLASS.NULLIFICATION
+        -- AMPLIFICATION: change is 5x larger than baseline
+        elseif math.abs(baselineDelta) > 0.1
+            and math.abs(ch.delta) > math.abs(baselineDelta) * 5 then
+            cls = MLID_CLASS.AMPLIFICATION
+        -- UNEXPECTED_GAIN: positive gain with no expected direction
+        elseif not expectedDir and ch.delta > 10 then
+            cls = MLID_CLASS.UNEXPECTED_GAIN
+        end
+
+        local csev = MLID_CLASS_SEV[cls] or SEV.INFO
+        local wsev = MLID_CLASS_SEV[worstClass] or SEV.INFO
+        if csev.score > wsev.score then
+            worstClass  = cls
+            worstChange = ch
+        end
+    end
+
+    return worstClass, worstChange
+end
+
+-- ----------------------------------------------------------------
+--   MAIN SCAN
+-- ----------------------------------------------------------------
+function DAL:mlidScan(remotePath, onProgress, onComplete)
+    if MLID.isRunning then
+        if onComplete then onComplete({}) end
+        return
+    end
+
+    local rec = self.discovered[remotePath]
+    if not rec or not rec.inst then
+        if onComplete then onComplete({}) end
+        return
+    end
+
+    MLID.isRunning = true
+    local findings = {}
+
+    task.spawn(function()
+        -- Phase 1: establish baseline
+        -- Fire with nil to get a "null" baseline (no payload)
+        if onProgress then
+            onProgress("BASELINE", 0, #MLID_MUTATIONS)
+        end
+
+        local snapBefore = mlidSnapshot()
+        pcall(function()
+            if rec.inst:IsA("RemoteEvent") then
+                rec.inst:FireServer(nil)
+            end
+        end)
+        task.wait(0.40)
+        local snapAfter = mlidSnapshot()
+        local baselineChanges = mlidDiff(snapBefore, snapAfter)
+
+        -- Build baseline delta map
+        local baselineDeltas = {}
+        for _, ch in ipairs(baselineChanges) do
+            baselineDeltas[ch.key] = ch.delta
+        end
+
+        -- Phase 2: mutation testing
+        for i, mut in ipairs(MLID_MUTATIONS) do
+            if onProgress then
+                onProgress(mut.label, i, #MLID_MUTATIONS)
+            end
+
+            local snapPre = mlidSnapshot()
+            pcall(function()
+                if rec.inst:IsA("RemoteEvent") then
+                    rec.inst:FireServer(mut.payload)
+                end
+            end)
+            task.wait(0.45)
+            local snapPost = mlidSnapshot()
+            local changes  = mlidDiff(snapPre, snapPost)
+
+            local cls, worstChange = mlidClassify(
+                mut, changes, rec.inst.Name, baselineDeltas)
+
+            if cls ~= MLID_CLASS.NONE then
+                local sev = MLID_CLASS_SEV[cls] or SEV.INFO
+                local propKey   = worstChange and worstChange.key   or "unknown"
+                local deltaBefore = worstChange and worstChange.before or 0
+                local deltaAfter  = worstChange and worstChange.after  or 0
+                local deltaVal    = worstChange and worstChange.delta  or 0
+                local baseline    = baselineDeltas[propKey] or 0
+
+                local finding = {
+                    ts           = tick(),
+                    remotePath   = remotePath,
+                    mutation     = mut,
+                    cls          = cls,
+                    severity     = sev,
+                    property     = propKey,
+                    baseline     = baseline,
+                    actual       = deltaVal,
+                    deviation    = deltaVal - baseline,
+                    valBefore    = deltaBefore,
+                    valAfter     = deltaAfter,
+                    recommendation = MLID_CLASS_REC[cls],
+                }
+
+                table.insert(findings, 1, finding)
+                table.insert(MLID.findings, 1, finding)
+                if #MLID.findings > MLID.MAX_F then
+                    table.remove(MLID.findings)
+                end
+
+                -- Auto-log as violation so Leverage Engine picks it up
+                self:logViolation(
+                    VTYPE.STATE_SPOOF, sev, remotePath,
+                    mut.payload,
+                    string.format(
+                        "[MLID %s] payload:'%s' type:%s | %s: " ..
+                        "%.2f -> %.2f (delta %.2f, baseline %.2f). %s",
+                        cls, mut.label, mut.mtype, propKey,
+                        deltaBefore, deltaAfter, deltaVal, baseline,
+                        MLID_CLASS_REC[cls]:sub(1, 80)
+                    ),
+                    "MLID"
+                )
+
+                if MLID.onFinding then MLID.onFinding(finding) end
+            end
+
+            task.wait(DAL.FUZZ_RATE)
+        end
+
+        MLID.isRunning = false
+        if onComplete then onComplete(findings) end
+    end)
+end
+
+function DAL:mlidScanAll(onProgress, onComplete)
+    local paths = {}
+    for path in pairs(self.discovered) do
+        table.insert(paths, path)
+    end
+    local idx = 0
+    local allFindings = {}
+
+    local function next()
+        idx = idx + 1
+        if idx > #paths then
+            if onComplete then onComplete(allFindings) end
+            return
+        end
+        local path = paths[idx]
+        if onProgress then
+            onProgress(string.format("[%d/%d] %s", idx, #paths,
+                path:match("([^%.]+)$") or path))
+        end
+        self:mlidScan(path, nil, function(findings)
+            for _, f in ipairs(findings) do
+                table.insert(allFindings, f)
+            end
+            next()
+        end)
+    end
+    next()
+end
+
+function DAL:getMlidFindings() return MLID.findings end
+
+-- ----------------------------------------------------------------
+--   MLID TAB BUILDER
+-- ----------------------------------------------------------------
+local function buildMlidTab(mlidPage, PW, PH)
+    -- Classification colours
+    local CLS_COL = {
+        INVERSION       = Color3.fromRGB(228,  60,  80),
+        UNEXPECTED_GAIN = Color3.fromRGB(220, 120,  40),
+        AMPLIFICATION   = Color3.fromRGB(220, 175,  50),
+        NULLIFICATION   = Color3.fromRGB( 90, 180, 255),
+        TYPE_CRASH      = Color3.fromRGB(160,  80, 255),
+        NONE            = Color3.fromRGB( 80,  90, 120),
+    }
+
+    -- Toolbar
+    local bar = mkFrame(mlidPage, 0, 0, PW, 28, Color3.new(0,0,0), 1, 52)
+
+    local scanBtn    = mkBtn(bar,  4,  4, 80, 20, "SCAN REMOTE",
+        Color3.fromRGB(40, 160, 80), Color3.fromRGB(40, 160, 80), 53)
+    local scanAllBtn = mkBtn(bar, 88,  4, 70, 20, "SCAN ALL",
+        Color3.fromRGB(90, 180, 255), Color3.fromRGB(90, 180, 255), 53)
+    local clearBtn   = mkBtn(bar,162,  4, 48, 20, "CLEAR",
+        Color3.fromRGB(80, 90, 120), Color3.fromRGB(160, 170, 200), 53)
+
+    -- Info strip
+    local info = mkFrame(mlidPage, 0, 28, PW, 16,
+        Color3.fromRGB(10, 12, 22), 0.60, 52)
+    local infoLbl = mkLabel(info, 6, 0, PW - 12, 16,
+        "Select a remote on the REMOTES tab, then press SCAN REMOTE.",
+        7, COL.DIM, Enum.TextXAlignment.Left, 53)
+
+    -- Scroll
+    local scroll = mkScroll(mlidPage, 2, 46, PW - 4, PH - 48, 52)
+
+    local function rebuildMlid()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+        local findings = DAL:getMlidFindings()
+        if #findings == 0 then
+            local er = mkFrame(scroll, 0, 0, PW - 14, 24,
+                Color3.new(0,0,0), 1, 53)
+            er.LayoutOrder = 1
+            mkLabel(er, 8, 0, PW - 20, 24,
+                "No findings yet. Run SCAN REMOTE or SCAN ALL.",
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+            scroll.CanvasSize = UDim2.fromOffset(0, 30)
+            return
+        end
+
+        local ROW_H = 62
+        for i, f in ipairs(findings) do
+            local clsCol = CLS_COL[f.cls] or COL.DIM
+
+            local row = mkFrame(scroll, 0, 0, PW - 14, ROW_H,
+                COL.ROW, 0.28, 53)
+            row.LayoutOrder = i
+            uiCorner(row, 4)
+
+            -- Left stripe
+            local stripe = mkFrame(row, 0, 0, 3, ROW_H, clsCol, 0.0, 54)
+            uiCorner(stripe, 2)
+
+            -- Classification badge
+            local clsBg = mkFrame(row, 7, 5, 100, 14, clsCol, 0.68, 54)
+            uiCorner(clsBg, 3)
+            mkLabel(clsBg, 0, 0, 100, 14, f.cls, 6, clsCol,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Severity badge
+            local sevBg = mkFrame(row, 111, 5, 52, 14,
+                f.severity.col, 0.68, 54)
+            uiCorner(sevBg, 3)
+            mkLabel(sevBg, 0, 0, 52, 14, f.severity.label, 6,
+                f.severity.col, Enum.TextXAlignment.Center, 55)
+
+            -- Payload label
+            mkLabel(row, PW - 110, 4, 100, 14,
+                f.mutation.label, 7, Color3.fromRGB(200, 210, 240),
+                Enum.TextXAlignment.Right, 54)
+
+            -- Remote path
+            mkLabel(row, 7, 21, PW - 20, 13,
+                f.remotePath:match("([^%.]+%.[^%.]+)$") or f.remotePath,
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+
+            -- Delta comparison
+            local deltaStr = string.format(
+                "%s: %.2f -> %.2f  (delta %+.2f,  baseline %+.2f)",
+                f.property:match("([^:]+)$") or f.property,
+                f.valBefore, f.valAfter, f.actual, f.baseline)
+            mkLabel(row, 7, 35, PW - 130, 13,
+                deltaStr, 7, Color3.fromRGB(180, 195, 225),
+                Enum.TextXAlignment.Left, 54)
+
+            -- LEVERAGE button
+            local levBtn = mkBtn(row, PW - 120, ROW_H - 22, 56, 16,
+                "LEVERAGE",
+                Color3.fromRGB(200, 40, 220),
+                Color3.fromRGB(200, 40, 220), 55)
+
+            -- RACE button
+            local raceBtn = mkBtn(row, PW - 60, ROW_H - 22, 50, 16,
+                "RACE x20",
+                Color3.fromRGB(220, 120, 40),
+                Color3.fromRGB(220, 120, 40), 55)
+
+            local captF = f
+            levBtn.MouseButton1Click:Connect(function()
+                -- Find closest violation for this remote
+                for _, v in ipairs(DAL.violations) do
+                    if v.remotePath == captF.remotePath then
+                        local report = DAL:getLeverageReport(v)
+                        DAL.showLeveragePanel(mlidPage.Parent, v, report)
+                        return
+                    end
+                end
+            end)
+
+            raceBtn.MouseButton1Click:Connect(function()
+                raceBtn.Text = "..."
+                DAL:raceProbe(captF.remotePath, 20, 200, function(ok, fired)
+                    raceBtn.Text = ok
+                        and (tostring(fired) .. "x")
+                        or  "[!]"
+                    task.delay(2, function() raceBtn.Text = "RACE x20" end)
+                end)
+            end)
+        end
+
+        scroll.CanvasSize = UDim2.fromOffset(0, #findings * (ROW_H + 2))
+
+        -- Update info strip counts
+        local inv, amp, null = 0, 0, 0
+        for _, f in ipairs(findings) do
+            if f.cls == "INVERSION"       then inv  = inv  + 1 end
+            if f.cls == "AMPLIFICATION"   then amp  = amp  + 1 end
+            if f.cls == "NULLIFICATION"   then null = null + 1 end
+        end
+        infoLbl.Text = string.format(
+            "%d findings  |  %d inversions  |  %d amplifications  |  %d nullifications",
+            #findings, inv, amp, null)
+    end
+
+    MLID.onFinding = function() rebuildMlid() end
+
+    -- Button wiring
+    scanBtn.MouseButton1Click:Connect(function()
+        -- Find the most recently discovered remote that has been fuzzed
+        local target = nil
+        local bestCount = -1
+        for path, rec in pairs(DAL.discovered) do
+            if rec.probeCount > bestCount then
+                bestCount = rec.probeCount
+                target    = path
+            end
+        end
+        if not target then
+            infoLbl.Text = "No remotes discovered. Run CRAWL first."
+            return
+        end
+        scanBtn.Text = "SCANNING..."
+        infoLbl.Text = "Scanning: " .. (target:match("([^%.]+)$") or target)
+        DAL:mlidScan(target,
+            function(label, i, total)
+                infoLbl.Text = string.format(
+                    "[%d/%d] Testing: %s", i, total, label)
+            end,
+            function(results)
+                scanBtn.Text = "SCAN REMOTE"
+                infoLbl.Text = string.format(
+                    "Done. %d exploitable findings on %s.",
+                    #results,
+                    target:match("([^%.]+)$") or target)
+                rebuildMlid()
+            end
+        )
+    end)
+
+    scanAllBtn.MouseButton1Click:Connect(function()
+        if MLID.isRunning then return end
+        scanAllBtn.Text = "RUNNING..."
+        local total = 0
+        for _ in pairs(DAL.discovered) do total = total + 1 end
+        infoLbl.Text = "Scanning all " .. total .. " remotes..."
+        DAL:mlidScanAll(
+            function(status) infoLbl.Text = status end,
+            function(findings)
+                scanAllBtn.Text = "SCAN ALL"
+                infoLbl.Text = string.format(
+                    "Complete. %d exploitable findings across %d remotes.",
+                    #findings, total)
+                rebuildMlid()
+            end
+        )
+    end)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        MLID.findings = {}
+        rebuildMlid()
+        infoLbl.Text = "Cleared."
+    end)
+
+    rebuildMlid()
+    return rebuildMlid
+end
+
+-- ==================================================================
 --   LEVERAGE ENGINE
 --   The core of DAL's purpose: takes a confirmed violation and
 --   answers three questions:
@@ -14257,6 +14846,7 @@ DAL.closeLeveragePanel = closeLeveragePanel
 DAL.buildLeverageTab = buildLeverageTab
 DAL.buildSpsTab      = buildSpsTab
 DAL.buildRsoTab      = buildRsoTab
+DAL.buildMlidTab     = buildMlidTab
 
     return DAL
 end)()
