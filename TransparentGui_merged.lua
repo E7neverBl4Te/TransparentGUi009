@@ -12309,6 +12309,7 @@ local function buildPanel(parentGui)
         { label = "C2 LOG",     accent = Color3.fromRGB(160,  80, 255) },
         { label = "LEVERAGE",   accent = Color3.fromRGB(200,  40, 220) },
         { label = "PRE-SCAN",   accent = Color3.fromRGB( 40, 180, 120) },
+        { label = "RSO",        accent = Color3.fromRGB( 40, 200, 160) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -12368,6 +12369,7 @@ local function buildPanel(parentGui)
     buildC2LogTab(pages[4], PW, PH)
     DAL.buildLeverageTab(pages[5], PW, PH, switchTab)
     DAL.buildSpsTab(pages[6], PW, PH)
+    DAL.buildRsoTab(pages[7], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -12872,6 +12874,655 @@ local function buildSpsTab(spsPage, PW, PH)
     end)
 
     return rebuildSps
+end
+
+-- ==================================================================
+--   REPLICATION STREAM OBSERVER  (RSO)
+--
+--   What the current tool cannot see:
+--     - The snapshot diff only catches changes AFTER a probe settles.
+--     - Sequential probes can't measure concurrency windows.
+--     - A numeric change is logged as "state changed" with no sense
+--       of whether the direction was expected or inverted.
+--
+--   What RSO adds:
+--     1. PERSISTENT WATCHER  -- connects Changed signals to every
+--        replicated ValueBase, Humanoid, and attributed instance in
+--        the DataModel. Runs continuously in the background.
+--     2. PROBE CORRELATION  -- every property mutation is timestamped
+--        and cross-referenced against the set of active probes.
+--        Mutations that occur while a probe is in flight are tagged
+--        to that probe automatically.
+--     3. DIRECTION ANALYSIS  -- for numeric changes, RSO compares
+--        the delta direction against the verb semantics of the remote
+--        that triggered the probe. A "DeductGold" remote that results
+--        in gold INCREASING is logged as INVERTED -- a logical inversion
+--        bug, not just a state change.
+--     4. DYNAMIC EXPANSION  -- ChildAdded connections on all watched
+--        containers mean new instances are picked up automatically.
+--
+--   Output: RsoEvent records streamed into DALSink and the RSO tab.
+-- ==================================================================
+
+-- ----------------------------------------------------------------
+--   DIRECTION ANALYSIS DICTIONARIES
+-- ----------------------------------------------------------------
+local RSO_DECREASE_VERBS = {
+    "deduct","remove","spend","cost","buy","purchase","use",
+    "consume","pay","subtract","lose","reduce","drop","trade",
+    "sell","withdraw","charge","take","damage","deplete","clear",
+    "delete","reset","expire","revoke","penalise","penalize",
+}
+local RSO_INCREASE_VERBS = {
+    "add","give","grant","earn","reward","refund","collect",
+    "gain","receive","deposit","credit","award","loot","pickup",
+    "restore","heal","boost","upgrade","unlock","generate","spawn",
+    "create","insert","register","activate","enable",
+}
+
+-- Severity of a direction-inverted event by property type
+local RSO_INVERSION_SEV = {
+    gold     = SEV.CRITICAL,
+    coin     = SEV.CRITICAL,
+    currency = SEV.CRITICAL,
+    cash     = SEV.CRITICAL,
+    point    = SEV.HIGH,
+    xp       = SEV.HIGH,
+    score    = SEV.HIGH,
+    health   = SEV.HIGH,
+    ammo     = SEV.MEDIUM,
+    speed    = SEV.MEDIUM,
+}
+
+-- ----------------------------------------------------------------
+--   RSO STATE
+-- ----------------------------------------------------------------
+local RSO = {
+    events     = {},   -- ring buffer newest-first
+    MAX_EVT    = 800,
+    watched    = {},   -- instPath -> { inst, lastVals={}, conns={} }
+    childConns = {},   -- containerPath -> RBXScriptConnection
+    watchCount = 0,
+    isActive   = false,
+    onEvent    = nil,  -- UI callback(event) or nil
+}
+
+-- ----------------------------------------------------------------
+--   HELPERS
+-- ----------------------------------------------------------------
+local function rsoGetPath(inst)
+    local parts = { inst.Name }
+    local p = inst.Parent
+    local depth = 0
+    while p and p ~= game and depth < 10 do
+        table.insert(parts, 1, p.Name)
+        p = p.Parent
+        depth = depth + 1
+    end
+    return table.concat(parts, ".")
+end
+
+local function rsoDirectionVerb(remoteName)
+    if not remoteName then return nil end
+    local lower = remoteName:lower()
+    for _, v in ipairs(RSO_DECREASE_VERBS) do
+        if lower:find(v, 1, true) then return "DECREASE" end
+    end
+    for _, v in ipairs(RSO_INCREASE_VERBS) do
+        if lower:find(v, 1, true) then return "INCREASE" end
+    end
+    return nil
+end
+
+local function rsoInversionSev(propName)
+    if not propName then return SEV.MEDIUM end
+    local lower = propName:lower()
+    for kw, sev in pairs(RSO_INVERSION_SEV) do
+        if lower:find(kw, 1, true) then return sev end
+    end
+    return SEV.MEDIUM
+end
+
+-- Find which DAL probe (if any) was active within the past 6 seconds
+local function rsoProbeLookup()
+    local now = tick()
+    local best = nil
+    local bestAge = math.huge
+    for traceId, probe in pairs(DAL.activeProbes) do
+        local age = now - (probe.firedTs or 0)
+        if age < 6.0 and age < bestAge then
+            best = probe
+            bestAge = age
+        end
+    end
+    return best
+end
+
+-- ----------------------------------------------------------------
+--   CORE RECORD
+-- ----------------------------------------------------------------
+function RSO:record(path, prop, before, after, inst)
+    -- Numeric delta
+    local delta = nil
+    local direction = "UNKNOWN"
+    if type(before) == "number" and type(after) == "number" then
+        delta = after - before
+        direction = "NEUTRAL"
+    end
+
+    -- Probe correlation
+    local probe = rsoProbeLookup()
+    local probeRemote = probe and probe.remotePath or nil
+    local probeId     = nil
+    if probe then
+        for tid, p in pairs(DAL.activeProbes) do
+            if p == probe then probeId = tid break end
+        end
+    end
+
+    -- Direction analysis
+    local expectedDir = rsoDirectionVerb(probeRemote)
+    local inverted = false
+    if delta and expectedDir then
+        if expectedDir == "DECREASE" and delta > 0 then
+            direction = "INVERTED"
+            inverted  = true
+        elseif expectedDir == "INCREASE" and delta < 0 then
+            direction = "INVERTED"
+            inverted  = true
+        elseif expectedDir == "DECREASE" and delta < 0 then
+            direction = "EXPECTED"
+        elseif expectedDir == "INCREASE" and delta > 0 then
+            direction = "EXPECTED"
+        end
+    end
+
+    local evt = {
+        ts          = tick(),
+        path        = path,
+        prop        = prop,
+        before      = tostring(before):sub(1, 40),
+        after       = tostring(after):sub(1, 40),
+        delta       = delta,
+        direction   = direction,
+        inverted    = inverted,
+        probeId     = probeId,
+        probeRemote = probeRemote,
+        severity    = inverted and rsoInversionSev(prop) or nil,
+    }
+
+    table.insert(self.events, 1, evt)
+    if #self.events > self.MAX_EVT then
+        table.remove(self.events)
+    end
+
+    -- Auto-log inversions as violations so Leverage Engine catches them
+    if inverted and probeRemote then
+        DAL:logViolation(
+            VTYPE.STATE_SPOOF,
+            evt.severity or SEV.HIGH,
+            probeRemote,
+            "rso:inversion",
+            string.format(
+                "[RSO INVERSION] %s.%s: %s -> %s (delta %s). " ..
+                "Remote '%s' implies %s but observed %s.",
+                path, prop,
+                tostring(before):sub(1,20), tostring(after):sub(1,20),
+                tostring(delta),
+                probeRemote, expectedDir,
+                delta > 0 and "INCREASE" or "DECREASE"
+            ),
+            probeId or "RSO"
+        )
+    end
+
+    -- Push to DALSink for C2 LOG
+    DALSink:push({
+        type     = "RSO",
+        sev      = inverted and (evt.severity and evt.severity.label or "HIGH")
+                            or (probeId and "INFO" or nil),
+        path     = path .. "." .. prop,
+        evidence = string.format(
+            "%s -> %s  [%s]%s",
+            tostring(before):sub(1,20),
+            tostring(after):sub(1,20),
+            direction,
+            probeRemote and ("  probe:" .. probeRemote:match("([^%.]+)$")) or ""
+        ),
+    })
+
+    if self.onEvent then self.onEvent(evt) end
+    return evt
+end
+
+-- ----------------------------------------------------------------
+--   INSTANCE WATCHER
+-- ----------------------------------------------------------------
+-- Properties to track on specific class types
+local RSO_WATCH_PROPS = {
+    NumberValue  = { "Value" },
+    IntValue     = { "Value" },
+    StringValue  = { "Value" },
+    BoolValue    = { "Value" },
+    Humanoid     = { "Health", "MaxHealth", "WalkSpeed", "JumpPower" },
+    Player       = {},  -- attributes only
+    Model        = {},  -- attributes only
+    Folder       = {},  -- attributes only
+}
+
+function RSO:watchInstance(inst)
+    local path = rsoGetPath(inst)
+    if self.watched[path] then return end  -- already watching
+
+    local entry = { inst = inst, lastVals = {}, conns = {} }
+    self.watched[path] = entry
+    self.watchCount    = self.watchCount + 1
+
+    local className = inst.ClassName
+    local props = RSO_WATCH_PROPS[className] or {}
+
+    -- Connect per-property signals for known classes
+    for _, prop in ipairs(props) do
+        local ok, val = pcall(function() return inst[prop] end)
+        if ok then
+            entry.lastVals[prop] = val
+            local conn = inst:GetPropertyChangedSignal(prop):Connect(function()
+                local ok2, newVal = pcall(function() return inst[prop] end)
+                if not ok2 then return end
+                local oldVal = entry.lastVals[prop]
+                entry.lastVals[prop] = newVal
+                if newVal ~= oldVal then
+                    self:record(path, prop, oldVal, newVal, inst)
+                end
+            end)
+            table.insert(entry.conns, conn)
+        end
+    end
+
+    -- Track all numeric/string attributes
+    local ok3, attrs = pcall(function() return inst:GetAttributes() end)
+    if ok3 then
+        for attrName, attrVal in pairs(attrs) do
+            if type(attrVal) == "number" or type(attrVal) == "string"
+               or type(attrVal) == "boolean" then
+                entry.lastVals["@" .. attrName] = attrVal
+            end
+        end
+        local attrConn = inst.AttributeChanged:Connect(function(attrName)
+            local ok4, newVal = pcall(function()
+                return inst:GetAttribute(attrName)
+            end)
+            if not ok4 then return end
+            local key    = "@" .. attrName
+            local oldVal = entry.lastVals[key]
+            entry.lastVals[key] = newVal
+            if newVal ~= oldVal and
+               (type(newVal) == "number" or type(newVal) == "string"
+                or type(newVal) == "boolean") then
+                self:record(path, key, oldVal, newVal, inst)
+            end
+        end)
+        table.insert(entry.conns, attrConn)
+    end
+end
+
+function RSO:unwatchInstance(path)
+    local entry = self.watched[path]
+    if not entry then return end
+    for _, conn in ipairs(entry.conns) do
+        pcall(function() conn:Disconnect() end)
+    end
+    self.watched[path]  = nil
+    self.watchCount     = math.max(0, self.watchCount - 1)
+end
+
+-- ----------------------------------------------------------------
+--   CRAWLER + DYNAMIC EXPANSION
+-- ----------------------------------------------------------------
+local RSO_CRAWL_ROOTS = {
+    function() return Players end,
+    function() return game:GetService("ReplicatedStorage") end,
+    function() return game:GetService("ReplicatedFirst") end,
+    function() return workspace end,
+}
+
+-- Classes worth crawling into (but not watching directly)
+local RSO_CONTAINER_CLASSES = {
+    Folder=true, Model=true, Configuration=true,
+    RemoteEvent=false, RemoteFunction=false,
+}
+
+function RSO:crawlContainer(container, depth)
+    if depth and depth > 8 then return end
+    local ok, children = pcall(function() return container:GetChildren() end)
+    if not ok then return end
+
+    for _, child in ipairs(children) do
+        local cn = child.ClassName
+        -- Watch if it's a ValueBase, Humanoid, or has attributes
+        if child:IsA("ValueBase") or child:IsA("Humanoid")
+           or child:IsA("Player") then
+            self:watchInstance(child)
+        end
+
+        -- Always track attributes on Folders and Models
+        if child:IsA("Folder") or child:IsA("Model")
+           or child:IsA("Configuration") then
+            self:watchInstance(child)
+        end
+
+        -- Recurse
+        pcall(function()
+            self:crawlContainer(child, (depth or 0) + 1)
+        end)
+    end
+end
+
+function RSO:attachChildWatcher(container)
+    local cpath = rsoGetPath(container)
+    if self.childConns[cpath] then return end
+
+    local ok, conn = pcall(function()
+        return container.ChildAdded:Connect(function(child)
+            if not self.isActive then return end
+            task.wait(0.05)  -- let child settle
+            self:watchInstance(child)
+            pcall(function() self:crawlContainer(child, 0) end)
+            pcall(function() self:attachChildWatcher(child) end)
+        end)
+    end)
+    if ok then self.childConns[cpath] = conn end
+end
+
+function RSO:attachPlayerWatcher()
+    -- When a new player joins, watch their leaderstats and character
+    local joinConn = Players.PlayerAdded:Connect(function(plr)
+        if not self.isActive then return end
+        task.wait(1)
+        self:watchInstance(plr)
+        local ls = plr:FindFirstChild("leaderstats")
+        if ls then self:crawlContainer(ls, 0) end
+        if plr.Character then
+            self:crawlContainer(plr.Character, 0)
+        end
+        plr.CharacterAdded:Connect(function(char)
+            if not self.isActive then return end
+            task.wait(0.5)
+            self:crawlContainer(char, 0)
+        end)
+    end)
+    table.insert(self.childConns, joinConn)
+
+    -- Watch already-present players
+    for _, plr in ipairs(Players:GetPlayers()) do
+        self:watchInstance(plr)
+        local ls = plr:FindFirstChild("leaderstats")
+        if ls then self:crawlContainer(ls, 0) end
+        if plr.Character then
+            self:crawlContainer(plr.Character, 0)
+        end
+    end
+end
+
+-- ----------------------------------------------------------------
+--   START / STOP
+-- ----------------------------------------------------------------
+function RSO:start()
+    if self.isActive then return end
+    self.isActive = true
+    self.events   = {}
+
+    task.spawn(function()
+        -- Walk all root containers
+        for _, rootFn in ipairs(RSO_CRAWL_ROOTS) do
+            local ok, root = pcall(rootFn)
+            if ok and root then
+                pcall(function() self:crawlContainer(root, 0) end)
+                pcall(function() self:attachChildWatcher(root) end)
+            end
+        end
+
+        -- Watch player-specific state
+        pcall(function() self:attachPlayerWatcher() end)
+
+        DALSink:push({
+            type     = "RSO",
+            sev      = "INFO",
+            path     = "RSO",
+            evidence = string.format(
+                "Observer started. Watching %d instances.",
+                self.watchCount),
+        })
+    end)
+end
+
+function RSO:stop()
+    self.isActive = false
+
+    for path in pairs(self.watched) do
+        self:unwatchInstance(path)
+    end
+    self.watched = {}
+
+    for _, conn in pairs(self.childConns) do
+        pcall(function() conn:Disconnect() end)
+    end
+    self.childConns = {}
+    self.watchCount = 0
+
+    DALSink:push({
+        type     = "RSO",
+        sev      = "INFO",
+        path     = "RSO",
+        evidence = "Observer stopped. All connections disconnected.",
+    })
+end
+
+function RSO:getEvents(filter)
+    if not filter then return self.events end
+    local out = {}
+    for _, e in ipairs(self.events) do
+        if filter == "INVERTED"    and e.inverted          then table.insert(out, e)
+        elseif filter == "PROBED" and e.probeId            then table.insert(out, e)
+        elseif filter == "ALL"                             then table.insert(out, e)
+        end
+    end
+    return out
+end
+
+-- Expose on DAL table
+DAL.RSO = RSO
+
+-- ----------------------------------------------------------------
+--   RSO TAB BUILDER
+--   Kept as a separate function to stay under the 200-register cap.
+-- ----------------------------------------------------------------
+local function buildRsoTab(rsoPage, PW, PH)
+    -- Toolbar
+    local bar = Instance.new("Frame")
+    bar.Size               = UDim2.fromOffset(PW, 30)
+    bar.BackgroundTransparency = 1
+    bar.BorderSizePixel    = 0
+    bar.ZIndex             = 52
+    bar.Parent             = rsoPage
+
+    local toggleBtn = mkBtn(bar, 4, 4, 64, 22, "START RSO",
+        Color3.fromRGB(40, 160, 80), Color3.fromRGB(40, 160, 80), 53)
+    local clearBtn  = mkBtn(bar, 72, 4, 48, 22, "CLEAR",
+        Color3.fromRGB(80, 90, 120), Color3.fromRGB(160, 170, 200), 53)
+
+    -- Filter buttons
+    local filters    = { "ALL", "PROBED", "INVERTED" }
+    local filterCols = {
+        ALL      = Color3.fromRGB(90, 180, 255),
+        PROBED   = Color3.fromRGB(220, 175, 50),
+        INVERTED = Color3.fromRGB(228, 60, 80),
+    }
+    local activeFilter = "ALL"
+    local filterBtns   = {}
+    local filterX = 124
+    for _, f in ipairs(filters) do
+        local fb = mkBtn(bar, filterX, 4, 64, 22, f,
+            filterCols[f], filterCols[f], 53)
+        filterBtns[f] = fb
+        filterX = filterX + 68
+    end
+
+    -- Stats labels
+    local watchLbl = mkLabel(bar, PW - 140, 0, 134, 30,
+        "0 watching", 7, COL.DIM, Enum.TextXAlignment.Right, 53)
+    local totalLbl = mkLabel(bar, PW - 140, 0, 134, 30,
+        "", 7, COL.DIM, Enum.TextXAlignment.Right, 53)
+
+    -- Scroll
+    local scroll = mkScroll(rsoPage, 2, 32, PW - 4, PH - 34, 52)
+
+    local function updateStats()
+        local all  = #RSO.events
+        local inv  = 0
+        local prob = 0
+        for _, e in ipairs(RSO.events) do
+            if e.inverted then inv = inv + 1 end
+            if e.probeId  then prob = prob + 1 end
+        end
+        watchLbl.Text = string.format(
+            "%d watching  |  %d events  |  %d inverted",
+            RSO.watchCount, all, inv)
+    end
+
+    local function rebuildRso()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+
+        local evts = RSO:getEvents(activeFilter)
+        if #evts == 0 then
+            local er = mkFrame(scroll, 0, 0, PW - 14, 24,
+                Color3.new(0,0,0), 1, 53)
+            er.LayoutOrder = 1
+            mkLabel(er, 8, 0, PW - 20, 24,
+                activeFilter == "ALL"
+                    and "Start RSO then probe remotes -- events appear here in real time."
+                    or  "No " .. activeFilter:lower() .. " events yet.",
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+            scroll.CanvasSize = UDim2.fromOffset(0, 30)
+            return
+        end
+
+        local ROW_H = 46
+        local now   = tick()
+        for i, e in ipairs(evts) do
+            local dirCol =
+                e.direction == "INVERTED"  and Color3.fromRGB(228,  60,  80) or
+                e.direction == "EXPECTED"  and Color3.fromRGB( 40, 200,  80) or
+                e.direction == "NEUTRAL"   and Color3.fromRGB( 90, 180, 255) or
+                COL.DIM
+
+            local row = mkFrame(scroll, 0, 0, PW - 14, ROW_H,
+                COL.ROW, 0.30, 53)
+            row.LayoutOrder = i
+            uiCorner(row, 4)
+
+            -- Direction stripe
+            local stripe = mkFrame(row, 0, 0, 3, ROW_H, dirCol, 0.15, 54)
+            uiCorner(stripe, 2)
+
+            -- Direction badge
+            local dBg = mkFrame(row, 7, 5, 58, 13, dirCol, 0.68, 54)
+            uiCorner(dBg, 3)
+            mkLabel(dBg, 0, 0, 58, 13, e.direction, 6, dirCol,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Timestamp (relative)
+            local age = math.floor(now - e.ts)
+            mkLabel(row, PW - 55, 3, 48, 13,
+                age < 60 and (age .. "s ago") or (math.floor(age/60) .. "m ago"),
+                6, COL.DIM, Enum.TextXAlignment.Right, 54)
+
+            -- Instance path + property
+            mkLabel(row, 70, 3, PW - 140, 13,
+                e.path .. "." .. e.prop,
+                7, Color3.fromRGB(185, 195, 225),
+                Enum.TextXAlignment.Left, 54)
+
+            -- Before -> After with delta
+            local deltaStr = e.delta
+                and string.format("  (delta: %+.2f)", e.delta) or ""
+            mkLabel(row, 7, 19, PW - 20, 13,
+                e.before .. "  ->  " .. e.after .. deltaStr,
+                7, Color3.fromRGB(155, 165, 200),
+                Enum.TextXAlignment.Left, 54)
+
+            -- Probe tag
+            if e.probeRemote then
+                local shortRemote = e.probeRemote:match("([^%.]+)$") or e.probeRemote
+                mkLabel(row, 7, 33, PW - 20, 12,
+                    "probe: " .. shortRemote,
+                    6, Color3.fromRGB(220, 175, 50),
+                    Enum.TextXAlignment.Left, 54)
+            elseif e.inverted then
+                mkLabel(row, 7, 33, PW - 20, 12,
+                    "[!] INVERSION -- no probe context (background change)",
+                    6, Color3.fromRGB(228, 60, 80),
+                    Enum.TextXAlignment.Left, 54)
+            end
+        end
+
+        scroll.CanvasSize = UDim2.fromOffset(0, #evts * (ROW_H + 2))
+        updateStats()
+    end
+
+    -- Wire RSO callback for live updates
+    RSO.onEvent = function(evt)
+        if rsoPage.Visible then rebuildRso() end
+        updateStats()
+    end
+
+    -- Toggle RSO on/off
+    toggleBtn.MouseButton1Click:Connect(function()
+        if RSO.isActive then
+            RSO:stop()
+            toggleBtn.Text             = "START RSO"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
+            uiStroke(toggleBtn, Color3.fromRGB(40, 160, 80), 0.55, 1)
+        else
+            RSO:start()
+            toggleBtn.Text             = "STOP RSO"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(228, 60, 80)
+            uiStroke(toggleBtn, Color3.fromRGB(228, 60, 80), 0.55, 1)
+        end
+        updateStats()
+    end)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        RSO.events = {}
+        rebuildRso()
+        updateStats()
+    end)
+
+    -- Filter button wiring
+    for _, f in pairs(filterBtns) do
+        local captF = f
+        local captKey = nil
+        for k, v in pairs(filterBtns) do
+            if v == captF then captKey = k end
+        end
+        captF.MouseButton1Click:Connect(function()
+            activeFilter = captKey
+            for k, fb in pairs(filterBtns) do
+                local col = filterCols[k]
+                fb.BackgroundTransparency =
+                    (k == captKey) and 0.45 or 0.72
+                fb.TextColor3 =
+                    (k == captKey) and col
+                    or Color3.fromRGB(100, 115, 155)
+            end
+            rebuildRso()
+        end)
+    end
+
+    rebuildRso()
+    return rebuildRso
 end
 
 -- ==================================================================
@@ -13448,6 +14099,7 @@ DAL.closeLeveragePanel = closeLeveragePanel
 -- lives outside it and can't see them directly.
 DAL.buildLeverageTab = buildLeverageTab
 DAL.buildSpsTab      = buildSpsTab
+DAL.buildRsoTab      = buildRsoTab
 
     return DAL
 end)()
