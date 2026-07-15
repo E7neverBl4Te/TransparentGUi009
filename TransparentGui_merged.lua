@@ -13999,152 +13999,213 @@ end
 local function showLeveragePanel(parentGui, violation, report)
     closeLeveragePanel()
 
-    local PW, PH = 520, 420
-    local LP = mkFrame(parentGui, 0, 0, PW, PH, Color3.fromRGB(8,10,18), 0.04, 80)
+    local PW, PH = 560, 500
+    local LP = mkFrame(parentGui, 0, 0, PW, PH,
+        Color3.fromRGB(8, 10, 20), 0.04, 80)
     LP.Position = UDim2.fromOffset(
         math.max(4, math.floor((parentGui.AbsoluteSize.X - PW) / 2)),
         math.max(4, math.floor((parentGui.AbsoluteSize.Y - PH) / 2))
     )
     uiCorner(LP, 10)
-    uiStroke(LP, report.severity.col, 0.25, 1)
+    uiStroke(LP, report.severity.col, 0.20, 1)
     leveragePanel = LP
 
-    -- Severity glow strip on left edge
+    -- Left severity stripe
     local strip = mkFrame(LP, 0, 0, 4, PH, report.severity.col, 0.0, 81)
     uiCorner(strip, 2)
 
-    -- Header bar
-    local hdr = mkFrame(LP, 0, 0, PW, 36, Color3.fromRGB(12,14,26), 0.08, 81)
+    --  HEADER 
+    local hdr = mkFrame(LP, 0, 0, PW, 44, Color3.fromRGB(12, 14, 28), 0.06, 81)
     uiCorner(hdr, 10)
 
     -- Confidence badge
-    local confCol = report.confidence == "Confirmed"  and Color3.fromRGB(228, 60, 80)
-                 or report.confidence == "Probable"   and Color3.fromRGB(220,120, 50)
-                 or                                        Color3.fromRGB( 90,180,255)
-    local confBg = mkFrame(hdr, 8, 9, 70, 18, confCol, 0.65, 82)
-    uiCorner(confBg, 4)
-    mkLabel(confBg, 0, 0, 70, 18, report.confidence, 7, confCol,
+    local confCol = report.confidence == "Confirmed" and Color3.fromRGB(228, 60, 80)
+                 or report.confidence == "Probable"  and Color3.fromRGB(220,120, 50)
+                 or                                      Color3.fromRGB( 90,180,255)
+    local confBg = mkFrame(hdr, 10, 12, 76, 20, confCol, 0.62, 82)
+    uiCorner(confBg, 5)
+    mkLabel(confBg, 0, 0, 76, 20, report.confidence, 7, confCol,
         Enum.TextXAlignment.Center, 83)
 
-    -- Violation type
-    mkLabel(hdr, 84, 0, PW - 160, 36, report.vtype, 9, COL.TEXT,
+    -- Violation type (large)
+    mkLabel(hdr, 94, 6, PW - 180, 20,
+        report.vtype, 11, COL.TEXT,
         Enum.TextXAlignment.Left, 82)
 
+    -- Remote path (small, muted)
+    mkLabel(hdr, 94, 26, PW - 180, 14,
+        report.remotePath:sub(1, 60), 7, COL.DIM,
+        Enum.TextXAlignment.Left, 82)
+
+    -- Severity badge (top right)
+    local sevBg = mkFrame(hdr, PW - 90, 12, 50, 20,
+        report.severity.col, 0.62, 82)
+    uiCorner(sevBg, 5)
+    mkLabel(sevBg, 0, 0, 50, 20, report.severity.label, 7,
+        report.severity.col,
+        Enum.TextXAlignment.Center, 83)
+
     -- Close button
-    local closeBtn = mkBtn(hdr, PW - 34, 8, 20, 20, "x",
+    local closeBtn = mkBtn(hdr, PW - 34, 12, 20, 20, "x",
         Color3.fromRGB(228,60,80), Color3.fromRGB(228,60,80), 82)
     closeBtn.MouseButton1Click:Connect(closeLeveragePanel)
 
-    -- Remote path label
-    mkLabel(LP, 8, 38, PW - 16, 14,
-        "-> " .. report.remotePath, 7, COL.DIM,
-        Enum.TextXAlignment.Left, 81)
+    --  SCROLL BODY 
+    local scroll = mkScroll(LP, 6, 50, PW - 12, PH - 116, 81)
+    local rowOrder = 0
 
-    -- Scroll area for the full report
-    local scroll = mkScroll(LP, 4, 54, PW - 8, PH - 120, 81)
+    -- Helper: coloured section header bar
+    local function sectionHeader(title, col)
+        rowOrder = rowOrder + 1
+        local bg = mkFrame(scroll, 0, 0, PW - 22, 24,
+            col, 0.82, 82)
+        bg.LayoutOrder = rowOrder
+        uiCorner(bg, 4)
 
-    local function addSection(title, body, titleCol)
-        local tRow = mkFrame(scroll, 0, 0, PW - 18, 18,
-            Color3.new(0,0,0), 1, 82)
-        tRow.LayoutOrder = #scroll:GetChildren()
-        mkLabel(tRow, 0, 0, PW - 18, 18,
-            "> " .. title, 8, titleCol or report.severity.col,
+        local accent = mkFrame(bg, 0, 0, 3, 24, col, 0.0, 83)
+        uiCorner(accent, 2)
+
+        mkLabel(bg, 10, 0, PW - 34, 24,
+            title, 8, col,
             Enum.TextXAlignment.Left, 83)
+    end
 
-        local bodyLines = {}
-        local maxW = PW - 26
-        -- word-wrap at ~90 chars
-        local wrapped = body:gsub("(.{1,90})(%s+)", "%1\n"):gsub("(.{1,90})$", "%1")
-        for line in (wrapped .. "\n"):gmatch("([^\n]*)\n") do
-            if line ~= "" then table.insert(bodyLines, line) end
+    -- Helper: body paragraph (auto word-wrap)
+    local function bodyText(text, col)
+        -- Split into ~80-char lines
+        local words = {}
+        for w in text:gmatch("%S+") do table.insert(words, w) end
+        local lines = {}
+        local cur   = ""
+        for _, w in ipairs(words) do
+            if #cur + #w + 1 > 78 then
+                if cur ~= "" then table.insert(lines, cur) end
+                cur = w
+            else
+                cur = cur == "" and w or cur .. " " .. w
+            end
         end
+        if cur ~= "" then table.insert(lines, cur) end
 
-        for _, line in ipairs(bodyLines) do
-            local lRow = mkFrame(scroll, 0, 0, PW - 18, 14,
+        for _, line in ipairs(lines) do
+            rowOrder = rowOrder + 1
+            local row = mkFrame(scroll, 0, 0, PW - 22, 16,
                 Color3.new(0,0,0), 1, 82)
-            lRow.LayoutOrder = #scroll:GetChildren()
-            mkLabel(lRow, 8, 0, PW - 26, 14, line, 7,
-                Color3.fromRGB(185, 195, 225),
+            row.LayoutOrder = rowOrder
+            mkLabel(row, 12, 0, PW - 30, 16, line, 8,
+                col or Color3.fromRGB(200, 210, 235),
                 Enum.TextXAlignment.Left, 83)
         end
-
-        -- Spacer
-        local spacer = mkFrame(scroll, 0, 0, PW - 18, 6,
-            Color3.new(0,0,0), 1, 82)
-        spacer.LayoutOrder = #scroll:GetChildren()
     end
 
-    -- WHAT YOU GAIN
-    addSection("WHAT YOU GAIN", report.headline, Color3.fromRGB(228,60,80))
-
-    -- MECHANISM
-    addSection("MECHANISM", report.mechanism, Color3.fromRGB(220,120,50))
-
-    -- ATTACK PATH
-    local stepTitle = mkFrame(scroll, 0, 0, PW - 18, 18,
-        Color3.new(0,0,0), 1, 82)
-    stepTitle.LayoutOrder = #scroll:GetChildren()
-    mkLabel(stepTitle, 0, 0, PW - 18, 18,
-        "> ATTACK PATH -> SB-RCE", 8, Color3.fromRGB(90,180,255),
-        Enum.TextXAlignment.Left, 83)
-
-    for i, step in ipairs(report.steps) do
-        local sRow = mkFrame(scroll, 0, 0, PW - 18, 14,
+    -- Helper: gap between sections
+    local function gap(h)
+        rowOrder = rowOrder + 1
+        local sp = mkFrame(scroll, 0, 0, PW - 22, h or 8,
             Color3.new(0,0,0), 1, 82)
-        sRow.LayoutOrder = #scroll:GetChildren()
-        mkLabel(sRow, 8, 0, PW - 26, 14,
-            string.format("%d. %s", i, step), 7,
-            Color3.fromRGB(185, 195, 225),
+        sp.LayoutOrder = rowOrder
+    end
+
+    -- Helper: numbered step with badge
+    local function stepRow(n, text, col)
+        rowOrder = rowOrder + 1
+        local row = mkFrame(scroll, 0, 0, PW - 22, 22,
+            Color3.fromRGB(14, 18, 32), 0.50, 82)
+        row.LayoutOrder = rowOrder
+        uiCorner(row, 4)
+
+        -- Number badge
+        local numBg = mkFrame(row, 6, 4, 16, 14, col, 0.60, 83)
+        uiCorner(numBg, 3)
+        mkLabel(numBg, 0, 0, 16, 14, tostring(n), 6, col,
+            Enum.TextXAlignment.Center, 84)
+
+        -- Step text (truncated cleanly)
+        mkLabel(row, 28, 0, PW - 46, 22, text:sub(1, 90), 8,
+            Color3.fromRGB(195, 205, 230),
             Enum.TextXAlignment.Left, 83)
     end
 
-    local spacer2 = mkFrame(scroll, 0, 0, PW - 18, 6,
-        Color3.new(0,0,0), 1, 82)
-    spacer2.LayoutOrder = #scroll:GetChildren()
+    --  SECTION 1: WHAT YOU GAIN 
+    gap(4)
+    sectionHeader("WHAT YOU GAIN", Color3.fromRGB(228, 60, 80))
+    gap(3)
+    bodyText(report.headline)
+    gap(10)
 
-    -- RCE VECTOR
-    addSection("PATH TO SB-RCE", report.rceVector, Color3.fromRGB(200,40,220))
+    --  SECTION 2: MECHANISM 
+    sectionHeader("HOW IT WORKS", Color3.fromRGB(220, 120, 50))
+    gap(3)
+    bodyText(report.mechanism)
+    gap(10)
 
-    -- Recalculate canvas height
+    --  SECTION 3: ATTACK PATH 
+    sectionHeader("ATTACK PATH", Color3.fromRGB(90, 180, 255))
+    gap(4)
+    for i, step in ipairs(report.steps) do
+        stepRow(i, step, Color3.fromRGB(90, 180, 255))
+        gap(2)
+    end
+    gap(8)
+
+    --  SECTION 4: EXPLOITATION VECTOR 
+    sectionHeader("EXPLOITATION VECTOR", Color3.fromRGB(40, 200, 140))
+    gap(3)
+    bodyText(report.rceVector, Color3.fromRGB(180, 235, 210))
+    gap(6)
+
+    -- Resize canvas to fit all rows
     local totalH = 0
     for _, c in ipairs(scroll:GetChildren()) do
-        if c:IsA("Frame") then totalH = totalH + c.AbsoluteSize.Y + 2 end
+        if c:IsA("Frame") then
+            totalH = totalH + c.AbsoluteSize.Y + 2
+        end
     end
-    scroll.CanvasSize = UDim2.fromOffset(0, totalH + 20)
+    scroll.CanvasSize = UDim2.fromOffset(0, totalH + 16)
 
-    -- Action buttons
-    local btnY = PH - 56
+    --  ACTION BAR 
+    local barY = PH - 58
+    local barBg = mkFrame(LP, 0, barY - 4, PW, 62,
+        Color3.fromRGB(10, 12, 24), 0.20, 81)
 
-    -- [APPLY TO NODE] -- the centrepiece
-    local applyBtn = mkBtn(LP, 8, btnY, PW - 120, 40,
+    -- [APPLY TO NODE]
+    local applyBtn = mkBtn(barBg, 8, 8, PW - 130, 44,
         "[DAL]  APPLY TO NODE  ->  S->S GRAPH",
-        Color3.fromRGB(200,40,220), Color3.fromRGB(200,40,220), 82)
+        Color3.fromRGB(40, 160, 80), Color3.fromRGB(40, 160, 80), 82)
     applyBtn.TextSize = 9
 
     applyBtn.MouseButton1Click:Connect(function()
         applyBtn.Text = "Spawning node..."
         local ok, result = DAL:applyToNode(report)
         if ok then
-            applyBtn.Text = "[OK] Node added to S->S"
-            applyBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
+            applyBtn.Text             = "[OK]  Node added to S->S"
+            applyBtn.BackgroundColor3 = Color3.fromRGB(20, 120, 60)
             task.delay(1.5, closeLeveragePanel)
         else
-            applyBtn.Text = "[X] " .. tostring(result)
-            applyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+            applyBtn.Text             = "[!]  " .. tostring(result):sub(1, 38)
+            applyBtn.BackgroundColor3 = Color3.fromRGB(160, 30, 30)
         end
     end)
 
-    -- [FUZZ AGAIN] -- re-runs probes on the same remote
-    local fuzzBtn = mkBtn(LP, PW - 108, btnY, 100, 40,
-        "<>  FUZZ AGAIN",
-        Color3.fromRGB(220,175,50), Color3.fromRGB(220,175,50), 82)
-    fuzzBtn.TextSize = 8
+    -- [RACE PROBE] -- replaces FUZZ AGAIN, matches new strategy
+    local raceBtn = mkBtn(barBg, PW - 118, 8, 108, 44,
+        "RACE PROBE x20",
+        Color3.fromRGB(220, 120, 40), Color3.fromRGB(220, 120, 40), 82)
+    raceBtn.TextSize = 8
 
-    fuzzBtn.MouseButton1Click:Connect(function()
-        fuzzBtn.Text = "Running..."
-        DAL:fuzzRemote(report.remotePath, nil, function()
-            fuzzBtn.Text = "<>  FUZZ AGAIN"
-        end)
+    raceBtn.MouseButton1Click:Connect(function()
+        if DAL.discovered[report.remotePath] then
+            raceBtn.Text = "Firing..."
+            DAL:raceProbe(report.remotePath, 20, 200, function(ok, fired)
+                raceBtn.Text = ok
+                    and (tostring(fired) .. " fired")
+                    or  "No remote"
+                task.delay(2, function() raceBtn.Text = "RACE PROBE x20" end)
+            end)
+        else
+            raceBtn.Text = "Not discovered"
+            task.delay(2, function() raceBtn.Text = "RACE PROBE x20" end)
+        end
     end)
 
     return LP
