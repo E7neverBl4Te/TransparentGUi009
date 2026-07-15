@@ -12321,6 +12321,7 @@ local function buildPanel(parentGui)
         { label = "RSO",        accent = Color3.fromRGB( 40, 200, 160) },
         { label = "MLID",       accent = Color3.fromRGB(228,  60,  80) },
         { label = "CPWM",       accent = Color3.fromRGB(220, 120,  40) },
+        { label = "CDP",        accent = Color3.fromRGB(200,  80, 255) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -12383,6 +12384,7 @@ local function buildPanel(parentGui)
     DAL.buildRsoTab(pages[7], PW, PH)
     DAL.buildMlidTab(pages[8], PW, PH)
     DAL.buildCpwmTab(pages[9], PW, PH)
+    DAL.buildCdpTab(pages[10], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -14670,6 +14672,691 @@ end
 
 
 -- ==================================================================
+--   CONFUSED DEPUTY PROBER  (CDP)
+--
+--   The Confused Deputy problem occurs when a high-privilege backend
+--   module blindly trusts data delivered by a low-security remote.
+--   Because ModuleScripts run once and share a single instance
+--   across all server scripts, poisoning that shared state
+--   compromises every system that reads from it.
+--
+--   The attack surface:
+--     A remote like UpdateSettings is designed to write one field
+--     (UIColor). If the server passes the entire client payload
+--     directly into the shared module table rather than extracting
+--     only the expected field, an attacker can include additional
+--     keys in the payload that overwrite adjacent module fields --
+--     including privilege flags, trade locks, admin status.
+--
+--   CDP tests this by firing structured injection payloads:
+--     { "Blue", isAdmin = true }   -- looks like valid color data
+--     { color = "Blue", adminLevel = 99, TradeLocked = false }
+--   ...and watching whether any unexpected field changes in the
+--   RSO stream after the payload fires.
+--
+--   Three finding classes:
+--     PRIVILEGE_ESCALATION -- a privilege/admin field changed.
+--                             Highest severity. Direct exploit.
+--     MODULE_POISON        -- a field outside the intended write
+--                             target changed. Shared module state
+--                             was modified by the injection.
+--     ADJACENT_OVERWRITE   -- a field at the same table depth as
+--                             the intended target changed. Partial
+--                             poisoning confirmed.
+-- ==================================================================
+
+-- ----------------------------------------------------------------
+--   PRIVILEGE FIELD CATALOGUE
+--   Fields that, if they change after a CDP probe, indicate
+--   privilege escalation or trust boundary bypass.
+-- ----------------------------------------------------------------
+local CDP_PRIV_FIELDS = {
+    "isAdmin","admin","adminLevel","adminRank",
+    "isStaff","staff","isMod","moderator",
+    "isDev","developer","isOwner","owner",
+    "TradeLocked","tradeLocked","canTrade","tradeEnabled",
+    "VIP","isVIP","isPremium","premium","verified",
+    "banned","isBanned","canBuy","purchaseEnabled",
+    "rank","role","level","tier","permissions","flags",
+    "maxItems","maxGold","goldCap","inventorySize","walletCap",
+    "isGuest","isWhitelisted","whitelist","blacklist",
+    "canKick","canBan","canModerate","superAdmin",
+}
+
+-- ----------------------------------------------------------------
+--   INJECTION PAYLOAD LIBRARY
+--   Each payload is designed to look like plausible client data
+--   while smuggling extra fields that attempt module state writes.
+-- ----------------------------------------------------------------
+local CDP_PAYLOADS = {
+    { label = "isAdmin inject",
+      payload = { "Blue", isAdmin = true } },
+    { label = "adminLevel inject",
+      payload = { color = "Blue", adminLevel = 99 } },
+    { label = "isDev + isStaff",
+      payload = { "Blue", isDev = true, isStaff = true } },
+    { label = "TradeLocked bypass",
+      payload = { "Blue", TradeLocked = false, canTrade = true } },
+    { label = "maxGold poison",
+      payload = { "Blue", maxGold = 999999, goldCap = 999999 } },
+    { label = "role escalation",
+      payload = { value = "Blue", role = "admin", rank = 99 } },
+    { label = "verified + premium",
+      payload = { "Blue", verified = true, isPremium = true } },
+    { label = "ban bypass",
+      payload = { "Blue", isBanned = false, banned = false } },
+    { label = "deep nested admin",
+      payload = { settings = { isAdmin = true, adminLevel = 99 },
+                  value = "Blue" } },
+    { label = "permission table",
+      payload = { "Blue",
+                  permissions = { admin=true, trade=true, kick=true } } },
+    { label = "maxItems + inventory",
+      payload = { "Blue", maxItems = 9999, inventorySize = 9999 } },
+    { label = "nil-hole smuggle",
+      payload = { "Blue", nil, isAdmin = true, TradeLocked = false } },
+    { label = "array overflow",
+      payload = { "Blue", true, true, 99, "admin", "developer" } },
+    { label = "underscore fields",
+      payload = { value="Blue", _admin=true, _priv={isAdmin=true} } },
+    { label = "superAdmin inject",
+      payload = { "Blue", superAdmin=true, canBan=true, canKick=true } },
+}
+
+-- ----------------------------------------------------------------
+--   CDP STATE
+-- ----------------------------------------------------------------
+local CDP = {
+    findings   = {},
+    MAX_F      = 300,
+    isRunning  = false,
+    onFinding  = nil,
+}
+
+-- ----------------------------------------------------------------
+--   BROAD SNAPSHOT (captures booleans + strings + numbers)
+--   More comprehensive than mlidSnapshot which is numeric-only.
+-- ----------------------------------------------------------------
+local function cdpSnapshot()
+    local snap = { ts = tick(), vals = {} }
+    local lp   = Players.LocalPlayer
+
+    -- Leaderstats (all ValueBase types)
+    local ls = lp:FindFirstChild("leaderstats")
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            if v:IsA("ValueBase") then
+                snap.vals["ls:" .. v.Name] = tostring(v.Value)
+            end
+        end
+    end
+
+    -- Player attributes (all scalar types)
+    local ok1, attrs = pcall(function() return lp:GetAttributes() end)
+    if ok1 then
+        for k, v in pairs(attrs) do
+            local t = type(v)
+            if t=="number" or t=="string" or t=="boolean" then
+                snap.vals["attr:" .. k] = tostring(v)
+            end
+        end
+    end
+
+    -- Character attributes
+    local char = lp.Character
+    if char then
+        local ok2, cattrs = pcall(function()
+            return char:GetAttributes()
+        end)
+        if ok2 then
+            for k, v in pairs(cattrs) do
+                local t = type(v)
+                if t=="number" or t=="string" or t=="boolean" then
+                    snap.vals["char:" .. k] = tostring(v)
+                end
+            end
+        end
+        -- Humanoid bools
+        local h = char:FindFirstChildOfClass("Humanoid")
+        if h then
+            snap.vals["hum:Health"]    = tostring(h.Health)
+            snap.vals["hum:WalkSpeed"] = tostring(h.WalkSpeed)
+        end
+    end
+
+    return snap
+end
+
+local function cdpDiff(before, after)
+    local changes = {}
+    for k, bv in pairs(before.vals) do
+        local av = after.vals[k]
+        if av ~= nil and av ~= bv then
+            table.insert(changes, {
+                key    = k,
+                before = bv,
+                after  = av,
+                isPriv = false,  -- filled by classifier
+            })
+        end
+    end
+    for k, av in pairs(after.vals) do
+        if before.vals[k] == nil then
+            table.insert(changes, {
+                key    = k,
+                before = "nil",
+                after  = av,
+                isPriv = false,
+            })
+        end
+    end
+    return changes
+end
+
+-- ----------------------------------------------------------------
+--   PRIVILEGE FIELD CHECK
+-- ----------------------------------------------------------------
+local function cdpIsPrivField(key)
+    local lower = tostring(key):lower()
+    -- Strip common prefixes like "attr:", "ls:", "char:"
+    local name = lower:match(":(.+)$") or lower
+    for _, pf in ipairs(CDP_PRIV_FIELDS) do
+        if name:find(pf:lower(), 1, true) then return true end
+    end
+    return false
+end
+
+-- ----------------------------------------------------------------
+--   CLASSIFICATION
+-- ----------------------------------------------------------------
+-- "Intended" fields: what fields would a UI remote normally touch?
+-- We use common UI / cosmetic field names as the expected target.
+local CDP_INTENDED_FIELDS = {
+    "color","colour","uicolor","theme","skin","outfit",
+    "hat","avatar","badge","title","tag","prefix",
+    "setting","settings","config","preference","display",
+    "name","username","nickname","status","message",
+}
+
+local function cdpIsIntended(key)
+    local lower = (key:match(":(.+)$") or key):lower()
+    for _, f in ipairs(CDP_INTENDED_FIELDS) do
+        if lower:find(f, 1, true) then return true end
+    end
+    return false
+end
+
+local function cdpClassify(changes)
+    local privChanges     = {}
+    local unexpectedChanges = {}
+
+    for _, ch in ipairs(changes) do
+        local isPriv     = cdpIsPrivField(ch.key)
+        local isIntended = cdpIsIntended(ch.key)
+        ch.isPriv        = isPriv
+
+        if isPriv and not isIntended then
+            table.insert(privChanges, ch)
+        elseif not isIntended then
+            table.insert(unexpectedChanges, ch)
+        end
+    end
+
+    if #privChanges > 0 then
+        return "PRIVILEGE_ESCALATION", privChanges, SEV.CRITICAL
+    elseif #unexpectedChanges > 0 then
+        return "MODULE_POISON", unexpectedChanges, SEV.HIGH
+    elseif #changes > 0 then
+        return "ADJACENT_OVERWRITE", changes, SEV.MEDIUM
+    end
+    return "NONE", {}, SEV.INFO
+end
+
+local CDP_CLASS_REC = {
+    PRIVILEGE_ESCALATION =
+        "A privilege field changed after the injection payload. " ..
+        "The server routed the entire client payload into a " ..
+        "shared module table without extracting only the " ..
+        "expected field. The injected key overwrote a security " ..
+        "flag in the module state. Repeat with targeted payloads " ..
+        "to escalate the specific privilege you want.",
+    MODULE_POISON =
+        "An unexpected field outside the intended write target " ..
+        "changed. The backend module consumed the full payload " ..
+        "rather than extracting one field, allowing adjacent " ..
+        "state to be poisoned. Map which systems read from this " ..
+        "module to understand the full impact surface.",
+    ADJACENT_OVERWRITE =
+        "A field at the same module depth as the intended target " ..
+        "changed. Partial poisoning confirmed. The write boundary " ..
+        "is not cleanly isolated. Escalate with more targeted " ..
+        "payloads to reach privilege-adjacent fields.",
+    NONE = "No unexpected field changes detected for this payload.",
+}
+
+-- ----------------------------------------------------------------
+--   MAIN SCAN
+-- ----------------------------------------------------------------
+function DAL:cdpScan(remotePath, onProgress, onComplete)
+    local rec = self.discovered[remotePath]
+    if not rec or not rec.inst then
+        if onComplete then onComplete({}) end
+        return
+    end
+
+    task.spawn(function()
+        local findings = {}
+
+        for i, mut in ipairs(CDP_PAYLOADS) do
+            if onProgress then
+                onProgress(i, #CDP_PAYLOADS, mut.label)
+            end
+
+            local snapBefore = cdpSnapshot()
+
+            pcall(function()
+                if rec.inst:IsA("RemoteEvent") then
+                    rec.inst:FireServer(mut.payload)
+                elseif rec.inst:IsA("RemoteFunction") then
+                    -- wrap in task.spawn so we don't block
+                    task.spawn(function()
+                        pcall(function()
+                            rec.inst:InvokeServer(mut.payload)
+                        end)
+                    end)
+                end
+            end)
+
+            task.wait(0.45)
+            local snapAfter = cdpSnapshot()
+            local changes   = cdpDiff(snapBefore, snapAfter)
+
+            if #changes > 0 then
+                local cls, relevantChanges, sev = cdpClassify(changes)
+
+                if cls ~= "NONE" then
+                    local finding = {
+                        ts              = tick(),
+                        remotePath      = remotePath,
+                        payloadLabel    = mut.label,
+                        payload         = mut.payload,
+                        cls             = cls,
+                        severity        = sev,
+                        changedFields   = changes,
+                        keyFields       = relevantChanges,
+                        recommendation  = CDP_CLASS_REC[cls],
+                    }
+
+                    table.insert(findings, finding)
+                    table.insert(CDP.findings, 1, finding)
+                    if #CDP.findings > CDP.MAX_F then
+                        table.remove(CDP.findings)
+                    end
+
+                    -- Build field summary for violation log
+                    local fieldSummary = {}
+                    for _, ch in ipairs(relevantChanges) do
+                        table.insert(fieldSummary,
+                            ch.key .. ": " ..
+                            ch.before .. " -> " .. ch.after)
+                    end
+
+                    self:logViolation(
+                        VTYPE.IDENTITY_LOSS, sev, remotePath,
+                        mut.label,
+                        string.format(
+                            "[CDP %s] payload:'%s' changed %d " ..
+                            "unexpected field(s): %s",
+                            cls, mut.label, #relevantChanges,
+                            table.concat(fieldSummary, " | "):sub(1,160)
+                        ),
+                        "CDP"
+                    )
+
+                    DALSink:push({
+                        type     = "CDP",
+                        sev      = sev.label,
+                        path     = remotePath,
+                        evidence = string.format(
+                            "[%s] %s -> %d field(s) changed",
+                            cls, mut.label, #relevantChanges),
+                    })
+
+                    if CDP.onFinding then CDP.onFinding(finding) end
+                end
+            end
+
+            task.wait(DAL.FUZZ_RATE)
+        end
+
+        if onComplete then onComplete(findings) end
+    end)
+end
+
+function DAL:cdpScanAll(onProgress, onComplete)
+    if CDP.isRunning then
+        if onComplete then onComplete({}) end
+        return
+    end
+    CDP.isRunning = true
+
+    local paths = {}
+    for path in pairs(self.discovered) do
+        table.insert(paths, path)
+    end
+
+    local allFindings = {}
+    local idx = 0
+
+    local function next()
+        idx = idx + 1
+        if idx > #paths then
+            CDP.isRunning = false
+            if onComplete then onComplete(allFindings) end
+            return
+        end
+        local path = paths[idx]
+        if onProgress then
+            onProgress(idx, #paths,
+                path:match("([^%.]+)$") or path)
+        end
+        self:cdpScan(path, nil, function(findings)
+            for _, f in ipairs(findings) do
+                table.insert(allFindings, f)
+            end
+            task.wait(0.3)
+            next()
+        end)
+    end
+    next()
+end
+
+function DAL:getCdpFindings() return CDP.findings end
+
+-- ----------------------------------------------------------------
+--   CDP TAB BUILDER
+-- ----------------------------------------------------------------
+local function buildCdpTab(cdpPage, PW, PH)
+    local CLS_COL = {
+        PRIVILEGE_ESCALATION = Color3.fromRGB(228,  60,  80),
+        MODULE_POISON        = Color3.fromRGB(220, 120,  40),
+        ADJACENT_OVERWRITE   = Color3.fromRGB(220, 175,  50),
+        NONE                 = Color3.fromRGB( 80,  90, 120),
+    }
+    local CLS_SHORT = {
+        PRIVILEGE_ESCALATION = "PRIV-ESC",
+        MODULE_POISON        = "MOD-POISON",
+        ADJACENT_OVERWRITE   = "ADJ-OVR",
+        NONE                 = "NONE",
+    }
+
+    -- Toolbar
+    local bar = mkFrame(cdpPage, 0, 0, PW, 28,
+        Color3.new(0,0,0), 1, 52)
+
+    local scanBtn    = mkBtn(bar,  4,  4, 80, 20, "SCAN REMOTE",
+        Color3.fromRGB(40,160,80), Color3.fromRGB(40,160,80), 53)
+    local scanAllBtn = mkBtn(bar, 88,  4, 66, 20, "SCAN ALL",
+        Color3.fromRGB(90,180,255), Color3.fromRGB(90,180,255), 53)
+    local clearBtn   = mkBtn(bar,158,  4, 48, 20, "CLEAR",
+        Color3.fromRGB(80,90,120), Color3.fromRGB(160,170,200), 53)
+
+    -- Filter buttons
+    local filterKeys = {
+        "ALL", "PRIV-ESC", "MOD-POISON", "ADJ-OVR"
+    }
+    local filterCols = {
+        ["ALL"]        = Color3.fromRGB(160,170,200),
+        ["PRIV-ESC"]   = Color3.fromRGB(228, 60, 80),
+        ["MOD-POISON"] = Color3.fromRGB(220,120, 40),
+        ["ADJ-OVR"]    = Color3.fromRGB(220,175, 50),
+    }
+    local activeFilter = "ALL"
+    local filterBtns   = {}
+    local fx = 210
+    for _, fk in ipairs(filterKeys) do
+        local col = filterCols[fk] or COL.DIM
+        local fb  = mkBtn(bar, fx, 4, 62, 20, fk, col, col, 53)
+        fb.BackgroundTransparency = (fk=="ALL") and 0.40 or 0.72
+        filterBtns[fk] = fb
+        local captFk = fk
+        fb.MouseButton1Click:Connect(function()
+            activeFilter = captFk
+            for k, b in pairs(filterBtns) do
+                b.BackgroundTransparency =
+                    (k == captFk) and 0.40 or 0.72
+            end
+        end)
+        fx = fx + 66
+    end
+
+    -- Info strip
+    local info = mkFrame(cdpPage, 0, 28, PW, 16,
+        Color3.fromRGB(10,12,22), 0.60, 52)
+    local infoLbl = mkLabel(info, 6, 0, PW-12, 16,
+        "Scan a remote to test for shared module state poisoning.",
+        7, COL.DIM, Enum.TextXAlignment.Left, 53)
+
+    -- Scroll
+    local scroll = mkScroll(cdpPage, 2, 46, PW-4, PH-48, 52)
+
+    local function rebuildCdp()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+
+        local findings = DAL:getCdpFindings()
+
+        -- Apply filter
+        local filtered = {}
+        for _, f in ipairs(findings) do
+            local short = CLS_SHORT[f.cls] or "NONE"
+            if activeFilter == "ALL" or short == activeFilter then
+                table.insert(filtered, f)
+            end
+        end
+
+        if #filtered == 0 then
+            local er = mkFrame(scroll, 0, 0, PW-14, 24,
+                Color3.new(0,0,0), 1, 53)
+            er.LayoutOrder = 1
+            mkLabel(er, 8, 0, PW-20, 24,
+                #findings == 0
+                    and "No findings. Run SCAN REMOTE or SCAN ALL."
+                    or  "No findings match the active filter.",
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+            scroll.CanvasSize = UDim2.fromOffset(0, 30)
+
+            -- Still update info strip
+            local priv, mod, adj = 0, 0, 0
+            for _, f in ipairs(findings) do
+                if f.cls == "PRIVILEGE_ESCALATION" then priv = priv+1
+                elseif f.cls == "MODULE_POISON"    then mod  = mod +1
+                elseif f.cls == "ADJACENT_OVERWRITE" then adj = adj+1
+                end
+            end
+            infoLbl.Text = string.format(
+                "%d findings  |  %d priv-esc  |  %d mod-poison  |  %d adj-owr",
+                #findings, priv, mod, adj)
+            return
+        end
+
+        local ROW_H = 72
+        local priv, mod, adj = 0, 0, 0
+
+        for i, f in ipairs(filtered) do
+            local clsCol   = CLS_COL[f.cls] or COL.DIM
+            local clsShort = CLS_SHORT[f.cls] or "?"
+
+            local row = mkFrame(scroll, 0, 0, PW-14, ROW_H,
+                COL.ROW, 0.25, 53)
+            row.LayoutOrder = i
+            uiCorner(row, 4)
+
+            -- Left severity stripe
+            mkFrame(row, 0, 0, 3, ROW_H, f.severity.col, 0.0, 54)
+
+            -- Classification badge
+            local clsBg = mkFrame(row, 7, 5, 76, 15, clsCol, 0.65, 54)
+            uiCorner(clsBg, 4)
+            mkLabel(clsBg, 0, 0, 76, 15, clsShort, 6, clsCol,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Severity badge
+            local sevBg = mkFrame(row, 87, 5, 50, 15,
+                f.severity.col, 0.65, 54)
+            uiCorner(sevBg, 4)
+            mkLabel(sevBg, 0, 0, 50, 15, f.severity.label, 6,
+                f.severity.col, Enum.TextXAlignment.Center, 55)
+
+            -- Payload label (right side)
+            mkLabel(row, PW-160, 4, 148, 14,
+                f.payloadLabel, 7, Color3.fromRGB(195,205,230),
+                Enum.TextXAlignment.Right, 54)
+
+            -- Remote path
+            mkLabel(row, 7, 22, PW-20, 13,
+                f.remotePath:match("([^%.]+%.[^%.]+)$") or f.remotePath,
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+
+            -- Changed fields summary (up to 2 fields)
+            local fieldLines = {}
+            for j, ch in ipairs(f.keyFields) do
+                if j > 2 then
+                    table.insert(fieldLines,
+                        string.format("(+%d more)", #f.keyFields - 2))
+                    break
+                end
+                table.insert(fieldLines, string.format(
+                    "%s: %s -> %s",
+                    ch.key:match("([^:]+)$") or ch.key,
+                    tostring(ch.before):sub(1,12),
+                    tostring(ch.after):sub(1,12)))
+            end
+            mkLabel(row, 7, 36, PW-20, 13,
+                table.concat(fieldLines, "  |  "):sub(1,90),
+                7, Color3.fromRGB(175, 190, 220),
+                Enum.TextXAlignment.Left, 54)
+
+            -- Action buttons
+            local levBtn  = mkBtn(row, 7,   ROW_H-19, 56, 15,
+                "LEVERAGE", Color3.fromRGB(200,40,220),
+                Color3.fromRGB(200,40,220), 55)
+            local raceBtn = mkBtn(row, 67,  ROW_H-19, 58, 15,
+                "RACE x20", Color3.fromRGB(220,120,40),
+                Color3.fromRGB(220,120,40), 55)
+            local retestBtn = mkBtn(row, 129, ROW_H-19, 52, 15,
+                "RETEST", Color3.fromRGB(90,180,255),
+                Color3.fromRGB(90,180,255), 55)
+
+            local captF = f
+            levBtn.MouseButton1Click:Connect(function()
+                for _, v in ipairs(DAL.violations) do
+                    if v.remotePath == captF.remotePath then
+                        local rpt = DAL:getLeverageReport(v)
+                        DAL.showLeveragePanel(cdpPage.Parent, v, rpt)
+                        return
+                    end
+                end
+            end)
+            raceBtn.MouseButton1Click:Connect(function()
+                raceBtn.Text = "..."
+                DAL:raceProbe(captF.remotePath, 20, 200,
+                    function(ok, fired)
+                        raceBtn.Text = ok
+                            and (tostring(fired).."x") or "[!]"
+                        task.delay(2, function()
+                            raceBtn.Text = "RACE x20"
+                        end)
+                    end)
+            end)
+            retestBtn.MouseButton1Click:Connect(function()
+                retestBtn.Text = "..."
+                DAL:cdpScan(captF.remotePath, nil, function()
+                    retestBtn.Text = "RETEST"
+                    rebuildCdp()
+                end)
+            end)
+
+            if f.cls == "PRIVILEGE_ESCALATION" then priv = priv+1
+            elseif f.cls == "MODULE_POISON"    then mod  = mod +1
+            elseif f.cls == "ADJACENT_OVERWRITE" then adj = adj+1
+            end
+        end
+
+        scroll.CanvasSize = UDim2.fromOffset(0, #filtered*(ROW_H+2))
+        infoLbl.Text = string.format(
+            "%d findings  |  %d priv-esc  |  %d mod-poison  |  %d adj-owr",
+            #findings, priv, mod, adj)
+    end
+
+    CDP.onFinding = function() rebuildCdp() end
+
+    scanBtn.MouseButton1Click:Connect(function()
+        -- Target highest-scored SPS result or most-probed remote
+        local target = nil
+        if #SPS.results > 0 then
+            target = SPS.results[1].path
+        else
+            local best = -1
+            for path, rec in pairs(DAL.discovered) do
+                if rec.probeCount > best then
+                    best=rec.probeCount; target=path
+                end
+            end
+        end
+        if not target then
+            infoLbl.Text = "No remotes found. Run CRAWL first."
+            return
+        end
+        scanBtn.Text = "SCANNING..."
+        infoLbl.Text = "Testing: " ..
+            (target:match("([^%.]+)$") or target)
+        DAL:cdpScan(target,
+            function(i, total, label)
+                infoLbl.Text = string.format(
+                    "[%d/%d] %s", i, total, label)
+            end,
+            function(findings)
+                scanBtn.Text = "SCAN REMOTE"
+                infoLbl.Text = string.format(
+                    "Done. %d exploitable findings.", #findings)
+                rebuildCdp()
+            end)
+    end)
+
+    scanAllBtn.MouseButton1Click:Connect(function()
+        if CDP.isRunning then return end
+        scanAllBtn.Text = "RUNNING..."
+        local total = 0
+        for _ in pairs(DAL.discovered) do total = total + 1 end
+        infoLbl.Text = "Scanning all " .. total .. " remotes..."
+        DAL:cdpScanAll(
+            function(i, n, name)
+                infoLbl.Text = string.format(
+                    "[%d/%d] %s", i, n, name)
+            end,
+            function(findings)
+                scanAllBtn.Text = "SCAN ALL"
+                infoLbl.Text = string.format(
+                    "Done. %d findings across %d remotes.",
+                    #findings, total)
+                rebuildCdp()
+            end)
+    end)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        CDP.findings = {}
+        rebuildCdp()
+        infoLbl.Text = "Cleared."
+    end)
+
+    rebuildCdp()
+    return rebuildCdp
+end
+
+
+-- ==================================================================
 --   LEVERAGE ENGINE
 --   The core of DAL's purpose: takes a confirmed violation and
 --   answers three questions:
@@ -15307,6 +15994,7 @@ DAL.buildSpsTab      = buildSpsTab
 DAL.buildRsoTab      = buildRsoTab
 DAL.buildMlidTab     = buildMlidTab
 DAL.buildCpwmTab     = buildCpwmTab
+DAL.buildCdpTab      = buildCdpTab
 
     return DAL
 end)()
