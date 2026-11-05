@@ -1742,18 +1742,37 @@ end
 -- Tier: HIGH (>=70) | MEDIUM (35-69) | LOW (<35)
 --
 -- Scoring dimensions (additive, then clamped):
---   Entry risk    +30  if REMOTE node unsecured (untrusted payload enters)
---   Laundering    +20  if BINDABLE unsecured (provenance lost)
---   Amplification +20  if MessagingService unsecured (fleet broadcast)
+--   Entry risk       +30  if REMOTE node unsecured (untrusted payload enters)
+--   Laundering       +20  if BINDABLE unsecured (provenance lost)
 --   Sink danger:
 --     require(dynamic ID)   +35  arbitrary code execution
 --     require(static ID)    +10  ownership risk only
 --     HttpService(dynamic)  +28  exfiltration + C2 channel
 --     HttpService(static)   +12  controlled egress
 --     data processing only    0  no execution/egress sink
---   Critical path +15  if Remote->Bindable->require(dynamic) pattern detected
---   Fleet+exec    +10  if messaging broadcast reaches execution sink
---   Control relief  -8  per enforced control (capped at -40)
+--   Critical path    +15  if Remote->Bindable->require(dynamic) detected
+--   Fleet+exec       +10  if messaging broadcast reaches execution sink
+--
+-- Cross-server hop surfaces (new):
+--   MESSAGING unsecured   +25  fleet-wide broadcast of attacker payload
+--   MEMSTORE unsecured    +18  shared ephemeral state poisoned across all servers
+--   MEMSTORE key-poison   +22  explicit key-poisoning action modeled
+--   DATASTORE unsecured   +20  persistent state poisoned across sessions
+--   DATASTORE rank/role   +28  privilege escalation that survives restart
+--   DATASTORE key-poison  +25  persistent key-poisoning action modeled
+--   TELEPORT unsecured    +18  credential carry across place boundary
+--   TELEPORT data-carry   +22  explicit TeleportData forging pattern modeled
+--   TELEPORT place-hop    +20  weak sub-place used as staging server
+--
+-- Cross-server path patterns:
+--   Remote+Messaging      +12  classic 3-node hop: Remote->fleet broadcast
+--   Remote+MemStore       +10  client poisons shared state via Remote chain
+--   Remote+DataStore      +18  PERSISTENT: privilege escalation cross-session
+--   Remote+Teleport       +14  credential carry via place-hop chain
+--   Messaging+MemStore    +15  FLEET SATURATION: broadcast + shared state both compromised
+--   DataStore rank-drain  +12  rank/role DataStore read is the attack target
+--
+--   Control relief         -8  per enforced control (capped at -40)
 
 local function scoreChain()
     local order = topoSort and topoSort() or nil
@@ -1764,16 +1783,25 @@ local function scoreChain()
     local hotSet = computeHotSet()
 
     -- Per-node flags
-    local remoteUnsecured   = false
-    local bindableUnsecured = false
-    local messagingUnsecured= false
-    local requireDynamic    = false
-    local requireStatic     = false
-    local httpDynamic       = false
-    local httpStatic        = false
-    local hasExecutionSink  = false
-    local hasEgressSink     = false
-    local controlsCount     = 0
+    local remoteUnsecured    = false
+    local bindableUnsecured  = false
+    local messagingUnsecured = false
+    local requireDynamic     = false
+    local requireStatic      = false
+    local httpDynamic        = false
+    local httpStatic         = false
+    local hasExecutionSink   = false
+    local hasEgressSink      = false
+    local controlsCount      = 0
+    -- Cross-server hop flags
+    local memstoreUnsecured  = false
+    local memstoreKeyPoison  = false
+    local datastoreUnsecured = false
+    local datastoreRankRead  = false
+    local datastoreKeyPoison = false
+    local teleportUnsecured  = false
+    local teleportDataCarry  = false
+    local teleportPlaceHop   = false
 
     local reasons   = {}
     local rawScore  = 0
@@ -1879,6 +1907,170 @@ local function scoreChain()
                     "HttpService: domain allowlisted, response not executed. Egress controlled.",
                     "LOW")
             end
+        -- -- Cross-server hop node scoring --------------------------------
+        elseif id == "MESSAGING" then
+            messagingUnsecured = true  -- reuse flag so existing fleet+exec pattern fires
+            local act = node.selectedAction and node.selectedAction.n or ""
+            if not sec then
+                if act == "Cross-Server Trigger" then
+                    addReason(25,
+                        "MESSAGING [Cross-Server Trigger]: unsecured Remote on Server A fires into "
+                        .. "MessagingService topic -- every server in the fleet executes based on "
+                        .. "client-influenced payload. Classic 3-node hop. No FE bypass required.",
+                        "CRITICAL")
+                elseif act == "Topic Broadcast" then
+                    addReason(25,
+                        "MESSAGING [Topic Broadcast]: client-derived payload published fleet-wide. "
+                        .. "Receiving servers trust the topic channel implicitly -- no sender attribution.",
+                        "CRITICAL")
+                elseif act == "PublishAsync" then
+                    addReason(22,
+                        "MESSAGING [PublishAsync]: unvalidated payload broadcast to all active servers. "
+                        .. "Downstream SubscribeAsync handlers execute with no knowledge of client origin.",
+                        "HIGH")
+                else
+                    addReason(20,
+                        "MESSAGING [" .. (act ~= "" and act or "unset") .. "]: "
+                        .. "MessagingService node unsecured -- fleet-wide broadcast of attacker-influenced data.",
+                        "HIGH")
+                end
+            else
+                addReason(-8,
+                    "MESSAGING: topic payload validated and stripped server-side before publish. "
+                    .. "Receiving servers cannot receive client-originated content via this channel.",
+                    "LOW")
+            end
+
+        elseif id == "MEMSTORE" then
+            local act = node.selectedAction and node.selectedAction.n or ""
+            if not sec then
+                memstoreUnsecured = true
+                if act == "Key Poisoning" then
+                    memstoreKeyPoison = true
+                    addReason(22,
+                        "MEMSTORE [Key Poisoning]: client -> unsecured Remote -> Server A writes "
+                        .. "crafted value to MemoryStoreService -> Server B reads it and makes a "
+                        .. "trust decision on poisoned shared state. All servers in fleet affected immediately.",
+                        "CRITICAL")
+                elseif act == "SortedMap:SetAsync" or act == "Queue:AddAsync" then
+                    addReason(20,
+                        "MEMSTORE [" .. act .. "]: client-influenced write to shared store. "
+                        .. "Every server reading this key or queue entry inherits the attacker's data "
+                        .. "as server-authoritative state.",
+                        "HIGH")
+                elseif act == "SortedMap:GetAsync" or act == "Queue:ReadAsync" then
+                    addReason(18,
+                        "MEMSTORE [" .. act .. "]: read path unsecured -- if any server in the fleet "
+                        .. "has allowed a client-influenced write to this key, reads here are poisoned.",
+                        "HIGH")
+                else
+                    addReason(18,
+                        "MEMSTORE [" .. (act ~= "" and act or "unset") .. "]: "
+                        .. "MemoryStoreService node unsecured -- shared ephemeral state reachable via "
+                        .. "client-influenced path. Fleet-wide trust assumption broken.",
+                        "HIGH")
+                end
+            else
+                addReason(-6,
+                    "MEMSTORE: keys namespaced server-side, never derived from client input. "
+                    .. "Write path validated before MemoryStore access.",
+                    "LOW")
+            end
+
+        elseif id == "DATASTORE" then
+            local act = node.selectedAction and node.selectedAction.n or ""
+            if not sec then
+                datastoreUnsecured = true
+                if act == "Key Poisoning" then
+                    datastoreKeyPoison = true
+                    addReason(25,
+                        "DATASTORE [Key Poisoning]: client -> unsecured Remote -> Server A writes "
+                        .. "crafted rank/role value to DataStoreService -> every future server read "
+                        .. "of that key grants elevated authority. Privilege escalation PERSISTS indefinitely.",
+                        "CRITICAL")
+                elseif act == "Rank / Role Read" then
+                    datastoreRankRead = true
+                    addReason(28,
+                        "DATASTORE [Rank / Role Read]: server grants authority based on a DataStore "
+                        .. "read. If any server ever allowed a client to influence that key's value, "
+                        .. "privilege escalation is persistent across sessions and server restarts.",
+                        "CRITICAL")
+                elseif act == "UpdateAsync" then
+                    addReason(22,
+                        "DATASTORE [UpdateAsync]: atomic read-modify-write path unsecured. "
+                        .. "Client-supplied modifier in the transform function corrupts persistent state "
+                        .. "for all future sessions on all servers.",
+                        "HIGH")
+                elseif act == "SetAsync" then
+                    addReason(20,
+                        "DATASTORE [SetAsync]: unsecured persistent write. "
+                        .. "Client-influenced value written here affects every future server read of this key.",
+                        "HIGH")
+                elseif act == "OrderedDataStore" then
+                    addReason(18,
+                        "DATASTORE [OrderedDataStore]: sorted persistent store unsecured. "
+                        .. "Prime poisoning target for leaderboard / rank tables -- "
+                        .. "attacker can inject arbitrary position or score.",
+                        "HIGH")
+                else
+                    addReason(20,
+                        "DATASTORE [" .. (act ~= "" and act or "unset") .. "]: "
+                        .. "DataStoreService node unsecured -- persistent state reachable via client path. "
+                        .. "Poisoned writes survive server restart and affect all future sessions.",
+                        "HIGH")
+                end
+            else
+                addReason(-8,
+                    "DATASTORE: keys server-derived, values validated before any trust decision. "
+                    .. "DataStore read never used directly as a permission or authority input.",
+                    "LOW")
+            end
+
+        elseif id == "TELEPORT" then
+            local act = node.selectedAction and node.selectedAction.n or ""
+            if not sec then
+                teleportUnsecured = true
+                if act == "TeleportData Carrier" then
+                    teleportDataCarry = true
+                    addReason(22,
+                        "TELEPORT [TeleportData Carrier]: client influences TeleportData content on "
+                        .. "a weak server via unsecured Remote, then teleports to a stronger server. "
+                        .. "Receiving server reads TeleportData and trusts it as authority -- "
+                        .. "forged credentials cross the place boundary undetected.",
+                        "CRITICAL")
+                elseif act == "Place-Hop" then
+                    teleportPlaceHop = true
+                    addReason(20,
+                        "TELEPORT [Place-Hop]: attacker exploits a weaker sub-place in the game universe "
+                        .. "to pack crafted credentials, then teleports to the main place. "
+                        .. "Classic staging-server credential carry. Receiving server never queries the origin.",
+                        "HIGH")
+                elseif act == "ReservedServer Hop" then
+                    addReason(20,
+                        "TELEPORT [ReservedServer Hop]: player carries crafted TeleportData into a "
+                        .. "reserved server. Reserved servers often carry different permission models "
+                        .. "and may be less hardened than the main game server.",
+                        "HIGH")
+                elseif act == "TeleportAsync" then
+                    addReason(18,
+                        "TELEPORT [TeleportAsync]: unsecured teleport path. "
+                        .. "TeleportData carried by this player has not been validated -- "
+                        .. "receiving server must not use it as an authority source.",
+                        "HIGH")
+                else
+                    addReason(18,
+                        "TELEPORT [" .. (act ~= "" and act or "unset") .. "]: "
+                        .. "TeleportService node unsecured -- player may carry client-influenced "
+                        .. "credentials across place boundaries without server-side re-validation.",
+                        "HIGH")
+                end
+            else
+                addReason(-7,
+                    "TELEPORT: TeleportData never trusted as authority on arrival. "
+                    .. "Permissions re-derived server-side independently of what TeleportData claims.",
+                    "LOW")
+            end
+
         -- -- HPDC node scoring --------------------------------------------
         elseif id == "INGRESS" then
             if not sec then
@@ -2003,6 +2195,63 @@ local function scoreChain()
         addReason(8,
             "Unvalidated client data reaches HttpService egress -- full C2 channel: exfil + receive instructions.",
             "HIGH")
+    end
+
+    -- -- Cross-server hop path patterns ------------------------------------
+    if remoteUnsecured and messagingUnsecured then
+        addReason(12,
+            "3-NODE HOP: Remote (Server A) -> MessagingService -> all servers. "
+            .. "Client payload exits Server A's trust boundary and re-enters every other server "
+            .. "through infrastructure those servers implicitly trust.",
+            "CRITICAL")
+    end
+
+    if remoteUnsecured and memstoreUnsecured then
+        addReason(10,
+            "SHARED STATE POISONING: unsecured Remote chain writes client data to MemoryStoreService. "
+            .. "Every server in the fleet reading that key inherits the attacker's value "
+            .. "as server-authoritative state -- without ever receiving a Remote fire.",
+            "CRITICAL")
+    end
+
+    if remoteUnsecured and datastoreUnsecured then
+        addReason(18,
+            "PERSISTENT PRIVILEGE ESCALATION: client-influenced data reaches DataStoreService "
+            .. "via unsecured Remote. Poisoned state persists across sessions and server restarts. "
+            .. "Attack need only succeed once -- all future reads are compromised.",
+            "CRITICAL")
+    end
+
+    if remoteUnsecured and teleportUnsecured then
+        addReason(14,
+            "CREDENTIAL CARRY CHAIN: client crafts TeleportData on this server via unsecured Remote, "
+            .. "then teleports to any place in the game universe carrying forged credentials. "
+            .. "Receiving servers cannot distinguish legitimate from attacker-set TeleportData.",
+            "CRITICAL")
+    end
+
+    if messagingUnsecured and memstoreUnsecured then
+        addReason(15,
+            "FLEET SATURATION: MessagingService broadcast AND MemoryStoreService poisoning active "
+            .. "simultaneously. Every server in the fleet receives the broadcast AND reads "
+            .. "poisoned shared state. No server in the universe is unaffected.",
+            "CRITICAL")
+    end
+
+    if datastoreRankRead and datastoreKeyPoison then
+        addReason(12,
+            "RANK DRAIN PATTERN: DataStore key-poisoning targets a rank/role read path. "
+            .. "Attacker achieves persistent privilege escalation that survives restart -- "
+            .. "elevated access is re-granted automatically on every future session.",
+            "CRITICAL")
+    end
+
+    if teleportDataCarry and teleportPlaceHop then
+        addReason(10,
+            "STAGED PLACE-HOP: TeleportData carrier AND place-hop both modeled. "
+            .. "Attacker uses a weak sub-place as a staging server to pack credentials, "
+            .. "then carries them to the main server in a single TeleportAsync call.",
+            "CRITICAL")
     end
 
     -- -- HPDC-specific path bonuses ----------------------------------------
