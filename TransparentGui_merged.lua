@@ -18,7 +18,7 @@ local T = {
     -- Panel geometry
     PANEL_W     = 360,
     PANEL_H     = 260,
-    PANEL_MIN_W = 220,
+    PANEL_MIN_W = 420,
     PANEL_MIN_H = 140,
     TITLEBAR_H  = 34,
     CORNER      = 8,
@@ -5442,12 +5442,28 @@ local function buildSourceToSinkPage(page)
     mL(toolbar,8,0,50,TOOLBAR_H,"ADD:",Enum.Font.GothamBold,8,GC.DIM,
         Enum.TextXAlignment.Left,9)
 
-    -- One spawn button per node type
-    local bx = 42
+    -- One spawn button per node type -- housed in a horizontal scroll so they
+    -- never overflow into the right-anchored control buttons regardless of width.
+    local spawnScroll = Instance.new("ScrollingFrame")
+    spawnScroll.Parent                  = toolbar
+    spawnScroll.Position                = UDim2.fromOffset(42, 0)
+    spawnScroll.Size                    = UDim2.new(1, -500, 1, 0)
+    spawnScroll.BackgroundTransparency  = 1
+    spawnScroll.BorderSizePixel         = 0
+    spawnScroll.ScrollBarThickness      = 2
+    spawnScroll.ScrollBarImageColor3    = Color3.fromRGB(80, 100, 180)
+    spawnScroll.ScrollBarImageTransparency = 0.60
+    spawnScroll.ScrollingDirection      = Enum.ScrollingDirection.X
+    spawnScroll.CanvasSize              = UDim2.fromOffset(0, TOOLBAR_H)
+    spawnScroll.AutomaticCanvasSize     = Enum.AutomaticSize.X
+    spawnScroll.ClipsDescendants        = true
+    spawnScroll.ZIndex                  = 9
+
+    local bx = 0
     for _, td in ipairs(NODE_TYPES) do
         local acc  = ROLE_ACC[td.role]
         local bw   = math.max(50, #td.label * 7 + 12)
-        local spawnBtn = mBtn(toolbar, bx, (TOOLBAR_H-18)/2, bw, 18,
+        local spawnBtn = mBtn(spawnScroll, bx, (TOOLBAR_H-18)/2, bw, 18,
             acc, 0.78, 9)
         mC(spawnBtn, 4)
         mS(spawnBtn, acc, 0.55, 1)
@@ -5671,7 +5687,7 @@ local function buildSourceToSinkPage(page)
     graphCanvas.ScrollBarThickness        = 3
     graphCanvas.ScrollBarImageColor3      = Color3.fromRGB(60,80,160)
     graphCanvas.ScrollBarImageTransparency= 0.40
-    graphCanvas.CanvasSize                = UDim2.fromOffset(1200, 800)
+    graphCanvas.CanvasSize                = UDim2.fromOffset(2000, 800)
     graphCanvas.ZIndex                    = 8
     graphCanvas.Parent                    = page
 
@@ -5679,7 +5695,7 @@ local function buildSourceToSinkPage(page)
     -- Larger spacing + slightly bigger dots, very high transparency so the
     -- game world remains visible behind the canvas.
     local GRID_STEP = 28
-    local GW, GH    = 1200, 800
+    local GW, GH    = 2000, 800
     for gx = 0, GW, GRID_STEP do
         for gy = 0, GH, GRID_STEP do
             local dot = mF(graphCanvas, gx, gy, 2, 2, GC.GRID, 0.88, 8)
@@ -5700,14 +5716,20 @@ local function buildSourceToSinkPage(page)
     end)
 
     -- -- Spawn default pipeline as a starting example ---------
-    local startX, startY = 30, 80
-    local spacing = NODE_W + 50
-    local prevNode = nil
+    -- Lay nodes in rows of 5 so they always fit on the initial canvas view.
+    local ROW_SIZE  = 5
+    local startX    = 30
+    local startY    = 60
+    local spacingX  = NODE_W + 48
+    local spacingY  = NODE_H + 50
+    local prevNode  = nil
     for i, td in ipairs(NODE_TYPES) do
-        local node = spawnNode(td, startX + (i-1)*spacing, startY)
+        local col  = (i - 1) % ROW_SIZE
+        local row  = math.floor((i - 1) / ROW_SIZE)
+        local node = spawnNode(td, startX + col * spacingX, startY + row * spacingY)
         if prevNode then
             local wf = makeWire()
-            table.insert(graphWires,{from=prevNode,to=node,frame=wf})
+            table.insert(graphWires, { from = prevNode, to = node, frame = wf })
         end
         prevNode = node
     end
@@ -6510,11 +6532,28 @@ local function buildHPDCPage(page)
         return node
     end
 
-    local bx = 42
+    -- Spawn buttons in a horizontal scroll frame -- same pattern as S->S toolbar.
+    -- HPDC right controls occupy ~216px so scroll frame leaves that clear.
+    local hpdcSpawnScroll = Instance.new("ScrollingFrame")
+    hpdcSpawnScroll.Parent                  = toolbar
+    hpdcSpawnScroll.Position                = UDim2.fromOffset(42, 0)
+    hpdcSpawnScroll.Size                    = UDim2.new(1, -220, 1, 0)
+    hpdcSpawnScroll.BackgroundTransparency  = 1
+    hpdcSpawnScroll.BorderSizePixel         = 0
+    hpdcSpawnScroll.ScrollBarThickness      = 2
+    hpdcSpawnScroll.ScrollBarImageColor3    = Color3.fromRGB(80, 100, 180)
+    hpdcSpawnScroll.ScrollBarImageTransparency = 0.60
+    hpdcSpawnScroll.ScrollingDirection      = Enum.ScrollingDirection.X
+    hpdcSpawnScroll.CanvasSize              = UDim2.fromOffset(0, TOOLBAR_H)
+    hpdcSpawnScroll.AutomaticCanvasSize     = Enum.AutomaticSize.X
+    hpdcSpawnScroll.ClipsDescendants        = true
+    hpdcSpawnScroll.ZIndex                  = 9
+
+    local bx = 0
     for _, td in ipairs(HPDC_NODE_TYPES) do
         local acc = ROLE_ACC[td.role]
         local bw  = math.max(52, #td.label * 7 + 14)
-        local spawnBtn = mBtn(toolbar, bx, (TOOLBAR_H-18)/2, bw, 18, acc, 0.78, 9)
+        local spawnBtn = mBtn(hpdcSpawnScroll, bx, (TOOLBAR_H-18)/2, bw, 18, acc, 0.78, 9)
         mC(spawnBtn, 4)
         mS(spawnBtn, acc, 0.55, 1)
         mL(spawnBtn,0,0,bw,18, td.label, Enum.Font.GothamBold, 8, acc,
@@ -6604,7 +6643,7 @@ local function buildHPDCPage(page)
     canvas.ScrollBarThickness         = 3
     canvas.ScrollBarImageColor3       = Color3.fromRGB(60,80,160)
     canvas.ScrollBarImageTransparency = 0.40
-    canvas.CanvasSize                 = UDim2.fromOffset(1200, 800)
+    canvas.CanvasSize                 = UDim2.fromOffset(2000, 800)
     canvas.ZIndex                     = 8
     canvas.Parent                     = page
 
@@ -6614,7 +6653,7 @@ local function buildHPDCPage(page)
 
     -- Grid dots
     local GRID_STEP = 28
-    for gx = 0, 1200, GRID_STEP do
+    for gx = 0, 2000, GRID_STEP do
         for gy = 0, 800, GRID_STEP do
             local dot = mF(canvas, gx, gy, 2, 2, GC.GRID, 0.88, 8)
             mC(dot, 1)
@@ -9960,6 +9999,7 @@ for i, def in ipairs(TAB_DEFS) do
     b.TextSize       = T.SIZE_TAB
     b.TextColor3     = T.COL_TEXT_SEC
     b.TextXAlignment = Enum.TextXAlignment.Center
+    b.TextTruncate   = Enum.TextTruncate.AtEnd
     corner(b, 6)
 
     b.MouseEnter:Connect(function()
