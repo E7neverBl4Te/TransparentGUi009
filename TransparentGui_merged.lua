@@ -260,6 +260,11 @@ local ROLE_ACC = {
     SERVICE      = Color3.fromRGB(100, 148, 240),
     REQUIRE      = Color3.fromRGB(218, 142,  48),
     HTTP         = Color3.fromRGB(218,  60,  68),
+    -- Cross-server hop surfaces
+    MESSAGING    = Color3.fromRGB(220,  72, 180),  -- broadcast / fleet-wide
+    MEMSTORE     = Color3.fromRGB( 58, 210, 108),  -- fast ephemeral shared state
+    DATASTORE    = Color3.fromRGB(218, 168,  44),  -- persistent trust state
+    TELEPORT     = Color3.fromRGB( 72, 192, 230),  -- credential carrier / place hop
     -- HPDC roles
     INGRESS      = Color3.fromRGB( 88, 138, 232),
     SERIAL       = Color3.fromRGB(160,  80, 255),
@@ -374,6 +379,58 @@ local NODE_TYPES = {
             { n = "POST Request",  d = "Send payload to an external endpoint." },
             { n = "Webhook Push",  d = "Push event to a webhook URL." },
             { n = "REST API Call", d = "Full JSON exchange with a remote REST service." },
+        },
+    },
+    {
+        id = "MESSAGING", role = "MESSAGING", label = "MessagingService",
+        control = {
+            name = "Authenticate topic + validate payload before publish",
+            d    = "Never publish client-derived data to a topic without stripping and re-validating it server-side. Receiving servers have no way to know the payload originated from a client -- they trust the channel implicitly." },
+        actions = {
+            { n = "PublishAsync",         d = "Broadcast a message to all active servers on a named topic. No return value. Fire-and-forget fleet-wide." },
+            { n = "SubscribeAsync",       d = "Register a handler on this server for a named topic. Fires for every publish including from poisoned upstream servers." },
+            { n = "Topic Broadcast",      d = "Client-influenced payload published to a topic and replicated to every server in the universe simultaneously." },
+            { n = "Cross-Server Trigger", d = "Remote fires unsecured handler on Server A -> Server A publishes to topic -> every Server B executes based on that message. Classic 3-node hop." },
+        },
+    },
+    {
+        id = "MEMSTORE", role = "MEMSTORE", label = "MemoryStoreService",
+        control = {
+            name = "Namespace keys by UserId; never derive key from client input",
+            d    = "Keys in MemoryStoreService are shared across all servers. A client that influences the key name or value written can poison reads made by every other server in the fleet. Always server-derive the key." },
+        actions = {
+            { n = "SortedMap:SetAsync", d = "Write a key-value pair to the shared sorted map. Visible to all servers immediately." },
+            { n = "SortedMap:GetAsync", d = "Read a value from the shared sorted map. If a client influenced the write, trust is already compromised." },
+            { n = "Queue:AddAsync",     d = "Push an item to the shared queue. All servers reading this queue will process the item." },
+            { n = "Queue:ReadAsync",    d = "Pop and process items from the shared queue. Unsafe if any server allows client-driven enqueue." },
+            { n = "Key Poisoning",      d = "Client -> unsecured Remote -> Server A writes crafted value to MemoryStore -> Server B reads it and makes a trust decision based on poisoned state." },
+        },
+    },
+    {
+        id = "DATASTORE", role = "DATASTORE", label = "DataStoreService",
+        control = {
+            name = "Server-derive keys; validate before reading into any trust decision",
+            d    = "DataStoreService persists across sessions and all servers. A poisoned DataStore write (via unsecured Remote) affects every future server read of that key -- including role, rank, and permission lookups. Never read a DataStore value directly into a trust or authority check without independent verification." },
+        actions = {
+            { n = "GetAsync",        d = "Read a persistent value. If the key or its value was ever client-influenced, this is a poisoned source." },
+            { n = "SetAsync",        d = "Write a persistent value. Client-influenced writes here affect all future sessions on all servers." },
+            { n = "UpdateAsync",     d = "Atomic read-modify-write. Dangerous if the transform function uses client-supplied data as a modifier." },
+            { n = "OrderedDataStore",d = "Sorted persistent store. Often used for leaderboards / rank tables -- prime poisoning target if writes are unsecured." },
+            { n = "Rank / Role Read",d = "Server reads rank or role from DataStore and grants authority based on it. If any server ever allowed a client to influence that key's value, privilege escalation is persistent." },
+            { n = "Key Poisoning",   d = "Client -> unsecured Remote -> Server A writes crafted rank/role value to DataStore -> Server B (or future session) reads it and grants elevated authority. Persists indefinitely." },
+        },
+    },
+    {
+        id = "TELEPORT", role = "TELEPORT", label = "TeleportService",
+        control = {
+            name = "Never trust TeleportData as authority; re-validate on arrival",
+            d    = "TeleportData travels with the player between places. Any server that grants authority based on TeleportData alone assumes the sending server set it legitimately -- it has no way to verify this. Always re-derive permissions server-side on arrival, independent of what TeleportData claims." },
+        actions = {
+            { n = "TeleportAsync",        d = "Teleport a player to another place or server. The player carries their TeleportData across the boundary." },
+            { n = "TeleportData Carrier", d = "Client influences TeleportData content on a weak server (via unsecured Remote), then teleports to a stronger server. Receiving server reads TeleportData and trusts it as authority." },
+            { n = "Place-Hop",            d = "Exploit a weaker sub-place in the universe with worse security. Use it to pack crafted credentials, then hop to the main place. Classic credential-carry attack." },
+            { n = "ReservedServer Hop",   d = "Teleport into a reserved server carrying crafted TeleportData. Reserved servers often have different permission models and may be less hardened." },
+            { n = "SetTeleportGui",       d = "Inject content into the teleport loading GUI. Limited scope but surface for visual manipulation during transit." },
         },
     },
 }
@@ -4271,7 +4328,11 @@ local function buildTraceGraph(result)
     for _, td in ipairs(NODE_TYPES) do nodeTypeMap[td.id] = td end
 
     -- Decide which stages to place (only those with evidence, plus always INPUT)
-    local CHAIN = { "INPUT", "REMOTE", "BINDABLE", "SERVICE", "REQUIRE", "HTTP" }
+    local CHAIN = {
+        "INPUT", "REMOTE", "BINDABLE", "SERVICE", "REQUIRE", "HTTP",
+        -- Cross-server hop boundary
+        "MESSAGING", "MEMSTORE", "DATASTORE", "TELEPORT",
+    }
     local toPlace = {}
     for _, id in ipairs(CHAIN) do
         if id == "INPUT" and #result.remotes > 0 then
