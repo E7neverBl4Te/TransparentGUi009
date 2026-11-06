@@ -10653,6 +10653,7 @@ local function sL(par, pos, size, text, tsz, col, xAlign)
     l.TextXAlignment         = xAlign or Enum.TextXAlignment.Left
     l.TextYAlignment         = Enum.TextYAlignment.Center
     l.TextTruncate           = Enum.TextTruncate.AtEnd
+    l.AutoLocalize           = false
     l.ZIndex                 = BZ + 1
     l.Parent                 = par
     return l
@@ -10670,6 +10671,7 @@ local function sBtn(par, pos, size, text, bgCol, txtCol)
     b.TextSize               = 9
     b.TextColor3             = txtCol or COL.TEXT
     b.AutoButtonColor        = false
+    b.AutoLocalize           = false
     b.ZIndex                 = BZ + 1
     b.Parent                 = par
     local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = b
@@ -10702,6 +10704,7 @@ local function sTB(par, pos, size, placeholder)
     tb.TextColor3             = COL.TEXT
     tb.PlaceholderColor3      = COL.DIM
     tb.TextXAlignment         = Enum.TextXAlignment.Left
+    tb.AutoLocalize           = false
     tb.ZIndex                 = BZ + 2
     tb.Parent                 = f
     return tb
@@ -10765,6 +10768,7 @@ local function logRow(scroll, text, col, order)
     l.TextColor3             = col or COL.TEXT
     l.TextXAlignment         = Enum.TextXAlignment.Left
     l.TextTruncate           = Enum.TextTruncate.AtEnd
+    l.AutoLocalize           = false
     l.ZIndex                 = BZ + 2
     l.Parent                 = r
     return r
@@ -11298,6 +11302,7 @@ local function buildSvcPanel(parent)
         tb.Font                   = Enum.Font.GothamBold
         tb.TextColor3             = COL.DIM
         tb.AutoButtonColor        = false
+        tb.AutoLocalize           = false
         tb.ZIndex                 = BZ + 2
         tb.Parent                 = tabBarF
         sCorner(tb, 4)
