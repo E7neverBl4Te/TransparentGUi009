@@ -10155,16 +10155,10 @@ local TAB_DEFS = {
         onActivate = function() activateGraphCtx("HPDC", hpdcCtx) end,
     },
     {
-        name  = "Settings",
-        build = function(page)
-            local l = lbl(page, CONTENT_PAD, CONTENT_PAD, 0, 0,
-                "Settings tab content.",
-                T.FONT_BODY, T.SIZE_BODY, T.COL_TEXT_SEC,
-                Enum.TextXAlignment.Left, 5)
-            l.Name = "DemoLabel"
-            l.Size = UDim2.new(1, -CONTENT_PAD*2, 1, -CONTENT_PAD*2)
-            l.TextYAlignment = Enum.TextYAlignment.Top
-        end,
+        name  = "SVC",
+        -- Placeholder only -- populated by SVC:init(SVCPage) at the
+        -- bottom of this script, same pattern as the DAL tab.
+        build = function(page) end,
     },
     {
         name  = "Info",
@@ -10285,6 +10279,9 @@ end
 -- in this file. This reference lets the DAL section (appended below)
 -- populate the page once DAL:init() actually exists.
 local DALPage = tabPages[#TAB_DEFS]
+-- SVC tab is at index 3 (replaced the Settings stub).
+-- Captured here so SVC:init() can populate it after the IIFE is defined.
+local SVCPage = tabPages[3]
 
 -- RESIZE GRIP (parented to PanelShell -- outside ClipsDescendants)
 local GripSize = T.RESIZE_GRIP
@@ -10594,6 +10591,756 @@ playOpenAnimation()
   |   Roblox Lua 5.1 compatible -- no external dependencies            |
   +======================================================================+
 --]]
+
+-- ==================================================================
+--   SVC MODULE  --  Services Analysis Layer
+--   Wrapped in an IIFE for the same register-budget reason as DAL.
+--   Mounts into SVCPage (the renamed Settings tab) via SVC:init().
+-- ==================================================================
+local SVC = (function()
+
+local _Players   = game:GetService("Players")
+local _LocalPlayer = _Players.LocalPlayer
+local _MsgSvc    = game:GetService("MessagingService")
+local _MemSvc    = game:GetService("MemoryStoreService")
+local _DSSvc     = game:GetService("DataStoreService")
+local _TpSvc     = game:GetService("TeleportService")
+
+local COL = {
+    BG     = Color3.fromRGB( 8,  10,  18),
+    HDR    = Color3.fromRGB(12,  15,  25),
+    BORDER = Color3.fromRGB(38,  48,  85),
+    TEXT   = Color3.fromRGB(210, 215, 235),
+    DIM    = Color3.fromRGB( 90, 105, 140),
+    ROW_A  = Color3.fromRGB(14,  17,  30),
+    INPUT  = Color3.fromRGB(18,  22,  40),
+    OK     = Color3.fromRGB( 50, 200, 100),
+    WARN   = Color3.fromRGB(220, 160,  50),
+    ERR    = Color3.fromRGB(220,  60,  70),
+    -- Accent colours matching ROLE_ACC for the 4 new node types
+    MSG    = Color3.fromRGB(220,  72, 180),
+    MEM    = Color3.fromRGB( 58, 210, 108),
+    DS     = Color3.fromRGB(218, 168,  44),
+    TP     = Color3.fromRGB( 72, 192, 230),
+    PKT    = Color3.fromRGB(160,  80, 255),
+}
+
+local BZ = 50  -- base ZIndex for SVC layer
+
+-- -- Local UI helpers ---------------------------------------------------
+local function sF(par, pos, size, col, alpha)
+    local f = Instance.new("Frame")
+    f.Position               = pos
+    f.Size                   = size
+    f.BackgroundColor3       = col   or COL.BG
+    f.BackgroundTransparency = alpha or 0
+    f.BorderSizePixel        = 0
+    f.ZIndex                 = BZ
+    f.Parent                 = par
+    return f
+end
+
+local function sL(par, pos, size, text, tsz, col, xAlign)
+    local l = Instance.new("TextLabel")
+    l.Position               = pos
+    l.Size                   = size
+    l.BackgroundTransparency = 1
+    l.BorderSizePixel        = 0
+    l.Text                   = text
+    l.Font                   = Enum.Font.Gotham
+    l.TextSize               = tsz or 9
+    l.TextColor3             = col  or COL.TEXT
+    l.TextXAlignment         = xAlign or Enum.TextXAlignment.Left
+    l.TextYAlignment         = Enum.TextYAlignment.Center
+    l.TextTruncate           = Enum.TextTruncate.AtEnd
+    l.ZIndex                 = BZ + 1
+    l.Parent                 = par
+    return l
+end
+
+local function sBtn(par, pos, size, text, bgCol, txtCol)
+    local b = Instance.new("TextButton")
+    b.Position               = pos
+    b.Size                   = size
+    b.BackgroundColor3       = bgCol  or Color3.fromRGB(40, 55, 110)
+    b.BackgroundTransparency = 0.55
+    b.BorderSizePixel        = 0
+    b.Text                   = text
+    b.Font                   = Enum.Font.GothamBold
+    b.TextSize               = 9
+    b.TextColor3             = txtCol or COL.TEXT
+    b.AutoButtonColor        = false
+    b.ZIndex                 = BZ + 1
+    b.Parent                 = par
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = b
+    b.MouseEnter:Connect(function() b.BackgroundTransparency = 0.35 end)
+    b.MouseLeave:Connect(function() b.BackgroundTransparency = 0.55 end)
+    return b
+end
+
+local function sTB(par, pos, size, placeholder)
+    local f = Instance.new("Frame")
+    f.Position               = pos
+    f.Size                   = size
+    f.BackgroundColor3       = COL.INPUT
+    f.BackgroundTransparency = 0.30
+    f.BorderSizePixel        = 0
+    f.ZIndex                 = BZ
+    f.Parent                 = par
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = f
+    local s = Instance.new("UIStroke")
+    s.Color = COL.BORDER; s.Transparency = 0.40; s.Thickness = 1; s.Parent = f
+    local tb = Instance.new("TextBox")
+    tb.Position               = UDim2.new(0, 6, 0, 0)
+    tb.Size                   = UDim2.new(1, -6, 1, 0)
+    tb.BackgroundTransparency = 1
+    tb.BorderSizePixel        = 0
+    tb.Text                   = ""
+    tb.PlaceholderText        = placeholder or ""
+    tb.Font                   = Enum.Font.Gotham
+    tb.TextSize               = 9
+    tb.TextColor3             = COL.TEXT
+    tb.PlaceholderColor3      = COL.DIM
+    tb.TextXAlignment         = Enum.TextXAlignment.Left
+    tb.ZIndex                 = BZ + 2
+    tb.Parent                 = f
+    return tb
+end
+
+local function sScroll(par, pos, size)
+    local sf = Instance.new("ScrollingFrame")
+    sf.Position                   = pos
+    sf.Size                       = size
+    sf.BackgroundTransparency     = 1
+    sf.BorderSizePixel            = 0
+    sf.ScrollBarThickness         = 3
+    sf.ScrollBarImageColor3       = COL.BORDER
+    sf.ScrollBarImageTransparency = 0.40
+    sf.CanvasSize                 = UDim2.fromOffset(0, 0)
+    sf.AutomaticCanvasSize        = Enum.AutomaticSize.Y
+    sf.ScrollingDirection         = Enum.ScrollingDirection.Y
+    sf.ZIndex                     = BZ
+    sf.Parent                     = par
+    local lo = Instance.new("UIListLayout")
+    lo.SortOrder = Enum.SortOrder.LayoutOrder
+    lo.Padding   = UDim.new(0, 1)
+    lo.Parent    = sf
+    return sf
+end
+
+local function sCorner(par, r)
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 4); c.Parent = par
+end
+
+local function sStroke(par, col, alpha)
+    local s = Instance.new("UIStroke")
+    s.Color = col or COL.BORDER; s.Transparency = alpha or 0.40; s.Thickness = 1; s.Parent = par
+end
+
+-- Section header: full-width bar with left accent stripe
+local SEC_H = 22
+local function secHdr(par, yOff, label, accent)
+    local h = sF(par, UDim2.new(0, 0, 0, yOff), UDim2.new(1, 0, 0, SEC_H), COL.HDR, 0.20)
+    sF(h, UDim2.fromOffset(0, 0), UDim2.fromOffset(2, SEC_H), accent, 0.0)
+    sL(h, UDim2.fromOffset(8, 0), UDim2.new(1, -10, 1, 0), label, 9, accent)
+    sCorner(h, 3)
+    return SEC_H
+end
+
+-- Append a single log row into a scroll frame
+local function logRow(scroll, text, col, order)
+    local r = Instance.new("Frame")
+    r.Size                   = UDim2.new(1, -4, 0, 15)
+    r.BackgroundTransparency = 1
+    r.BorderSizePixel        = 0
+    r.LayoutOrder            = order or 9999
+    r.ZIndex                 = BZ + 1
+    r.Parent                 = scroll
+    local l = Instance.new("TextLabel")
+    l.Size                   = UDim2.new(1, 0, 1, 0)
+    l.BackgroundTransparency = 1
+    l.Text                   = text
+    l.Font                   = Enum.Font.Code
+    l.TextSize               = 8
+    l.TextColor3             = col or COL.TEXT
+    l.TextXAlignment         = Enum.TextXAlignment.Left
+    l.TextTruncate           = Enum.TextTruncate.AtEnd
+    l.ZIndex                 = BZ + 2
+    l.Parent                 = r
+    return r
+end
+
+-- ================================================================
+--   MSG TAB  --  MessagingService
+-- ================================================================
+local function buildMsgTab(page)
+    local PAD = 8
+    local Y   = 0
+    local accent = COL.MSG
+
+    Y = Y + secHdr(page, Y, "TOPIC MONITOR", accent)
+
+    local topicTB = sTB(page,
+        UDim2.new(0, PAD,  0, Y + 4),
+        UDim2.new(1, -PAD*2 - 76, 0, 18),
+        "topic name  e.g.  AdminUpdate")
+    local subBtn = sBtn(page,
+        UDim2.new(1, -PAD - 68, 0, Y + 4),
+        UDim2.fromOffset(68, 18),
+        "SUBSCRIBE", accent, COL.BG)
+    Y = Y + 26
+
+    local statusL = sL(page,
+        UDim2.new(0, PAD, 0, Y),
+        UDim2.new(1, -PAD*2, 0, 14),
+        "Not subscribed.", 8, COL.DIM)
+    Y = Y + 16
+
+    local logSF = sScroll(page,
+        UDim2.new(0, PAD, 0, Y),
+        UDim2.new(1, -PAD*2, 0, 90))
+    sStroke(logSF, accent, 0.65)
+    Y = Y + 94
+
+    local clearBtn = sBtn(page,
+        UDim2.new(1, -PAD - 56, 0, Y),
+        UDim2.fromOffset(56, 16),
+        "CLEAR LOG", COL.ERR, COL.TEXT)
+    Y = Y + 22
+
+    Y = Y + secHdr(page, Y, "ATTACK SURFACE REFERENCE", accent)
+    local refSF = sScroll(page,
+        UDim2.new(0, PAD, 0, Y),
+        UDim2.new(1, -PAD*2, 1, -Y - 4))
+
+    local REF = {
+        { "3-NODE HOP:", COL.TEXT },
+        { "  Client -> unsecured Remote (Server A)", COL.DIM },
+        { "  -> MessagingService:PublishAsync(topic, payload)", COL.DIM },
+        { "  -> Server B SubscribeAsync handler executes", COL.DIM },
+        { "", COL.DIM },
+        { "HIGH-RISK TOPIC NAME PATTERNS:", COL.WARN },
+        { "  AdminUpdate   RankSync   PermissionChange", COL.DIM },
+        { "  PlayerJoined  StateSync  ServerBroadcast", COL.DIM },
+        { "", COL.DIM },
+        { "Receiving servers trust the topic channel implicitly.", COL.TEXT },
+        { "No sender attribution exists in the message payload.", COL.TEXT },
+        { "No FE bypass required -- infrastructure is the hop.", COL.ERR },
+    }
+    for i, r in ipairs(REF) do logRow(refSF, r[1], r[2], i) end
+
+    -- Wire
+    local activeConn = nil
+    local logIdx = 0
+    subBtn.MouseButton1Click:Connect(function()
+        local topic = topicTB.Text:gsub("%s+", "")
+        if topic == "" then
+            statusL.Text = "Enter a topic name."; statusL.TextColor3 = COL.WARN; return
+        end
+        if activeConn then
+            pcall(function() activeConn:Disconnect() end)
+            activeConn = nil
+            subBtn.Text = "SUBSCRIBE"; subBtn.BackgroundColor3 = accent
+            statusL.Text = "Unsubscribed: " .. topic; statusL.TextColor3 = COL.DIM
+            return
+        end
+        local ok, err = pcall(function()
+            activeConn = _MsgSvc:SubscribeAsync(topic, function(msg)
+                logIdx = logIdx + 1
+                local ts  = string.format("[%.1f]", tick() % 10000)
+                local pay = tostring(msg.Data):sub(1, 70)
+                logRow(logSF, ts .. "  " .. pay, COL.MSG, logIdx)
+                local low = pay:lower()
+                if low:find("rank") or low:find("admin") or low:find("role") or low:find("perm") then
+                    logIdx = logIdx + 1
+                    logRow(logSF, "   !! Privilege-pattern in payload -- verify server validates.", COL.ERR, logIdx)
+                end
+            end)
+        end)
+        if ok then
+            subBtn.Text = "UNSUB"; subBtn.BackgroundColor3 = COL.ERR
+            statusL.Text = "Subscribed: " .. topic .. "  (waiting...)"; statusL.TextColor3 = accent
+        else
+            statusL.Text = "Subscribe failed: " .. tostring(err):sub(1,55); statusL.TextColor3 = COL.ERR
+        end
+    end)
+    clearBtn.MouseButton1Click:Connect(function()
+        for _, c in ipairs(logSF:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+        logIdx = 0
+    end)
+end
+
+-- ================================================================
+--   MEM TAB  --  MemoryStoreService
+-- ================================================================
+local function buildMemTab(page)
+    local PAD = 8
+    local Y   = 0
+    local accent = COL.MEM
+
+    Y = Y + secHdr(page, Y, "KEY INSPECTOR", accent)
+
+    -- Store type toggle
+    local storeTypes = { "SortedMap", "Queue" }
+    local storeIdx   = 1
+    local storeBtn = sBtn(page,
+        UDim2.new(0, PAD, 0, Y + 4),
+        UDim2.fromOffset(80, 18),
+        "SortedMap ▾", Color3.fromRGB(20, 60, 40), accent)
+    storeBtn.MouseButton1Click:Connect(function()
+        storeIdx = (storeIdx % #storeTypes) + 1
+        storeBtn.Text = storeTypes[storeIdx] .. " ▾"
+    end)
+    Y = Y + 26
+
+    local keyTB = sTB(page,
+        UDim2.new(0, PAD, 0, Y + 4),
+        UDim2.new(1, -PAD*2 - 76, 0, 18),
+        "key  e.g.  rank_12345678")
+    local readBtn = sBtn(page,
+        UDim2.new(1, -PAD - 68, 0, Y + 4),
+        UDim2.fromOffset(68, 18),
+        "READ KEY", accent, COL.BG)
+    Y = Y + 26
+
+    local resultF = sF(page,
+        UDim2.new(0, PAD, 0, Y),
+        UDim2.new(1, -PAD*2, 0, 44),
+        COL.ROW_A, 0.25)
+    sCorner(resultF, 4); sStroke(resultF, accent, 0.70)
+    local resultL = sL(resultF,
+        UDim2.fromOffset(6, 2), UDim2.new(1, -12, 1, -4),
+        "Result will appear here.", 8, COL.DIM)
+    resultL.TextWrapped = true; resultL.TextYAlignment = Enum.TextYAlignment.Top
+    Y = Y + 48
+
+    Y = Y + secHdr(page, Y, "INSECURE KEY PATTERNS", accent)
+    local patSF = sScroll(page,
+        UDim2.new(0, PAD, 0, Y),
+        UDim2.new(1, -PAD*2, 1, -Y - 4))
+
+    local PATS = {
+        { "rank_{userId}",       "CRITICAL", "Any server write to this key poisons all future reads fleet-wide." },
+        { "admin_{name}",        "CRITICAL", "Admin flag keyed on player name -- trivially spoofable client-side." },
+        { "role_{userId}",       "HIGH",     "Role in shared store: trust decision derived from poisonable state." },
+        { "perm_{anything}",     "CRITICAL", "Permission entry in MemoryStore: grants authority to entire fleet." },
+        { "sess_{userId}",       "MEDIUM",   "Session state in shared store: race window on key read/write." },
+        { "inv_{userId}_{item}", "HIGH",     "Inventory in shared store: item duplication via key poisoning." },
+    }
+    local pi = 0
+    for _, p in ipairs(PATS) do
+        local rc = p[2] == "CRITICAL" and COL.ERR or p[2] == "HIGH" and COL.WARN or COL.TEXT
+        pi = pi + 1; logRow(patSF, "[" .. p[2] .. "]  " .. p[1], rc, pi)
+        pi = pi + 1; logRow(patSF, "         " .. p[3], COL.DIM, pi)
+        pi = pi + 1; logRow(patSF, "", COL.DIM, pi)
+    end
+
+    readBtn.MouseButton1Click:Connect(function()
+        local key = keyTB.Text:gsub("%s+", "")
+        if key == "" then resultL.Text = "Enter a key name."; resultL.TextColor3 = COL.WARN; return end
+        local ok, val = pcall(function()
+            if storeTypes[storeIdx] == "SortedMap" then
+                return _MemSvc:GetSortedMap("SVC_PROBE"):GetAsync(key)
+            else
+                return "[Queue read is destructive -- inspect via SortedMap instead]"
+            end
+        end)
+        if ok then
+            resultL.Text      = val == nil and "[nil -- key not found]" or tostring(val):sub(1,160)
+            resultL.TextColor3 = val ~= nil and accent or COL.DIM
+        else
+            resultL.Text = "Failed: " .. tostring(val):sub(1,100); resultL.TextColor3 = COL.ERR
+        end
+    end)
+end
+
+-- ================================================================
+--   DS TAB  --  DataStoreService
+-- ================================================================
+local function buildDsTab(page)
+    local PAD = 8
+    local Y   = 0
+    local accent = COL.DS
+
+    Y = Y + secHdr(page, Y, "DATASTORE PROBE", accent)
+
+    local storeTB = sTB(page,
+        UDim2.new(0, PAD, 0, Y + 4),
+        UDim2.new(1, -PAD*2, 0, 18),
+        "store name  e.g.  PlayerData")
+    Y = Y + 26
+
+    local keyTB = sTB(page,
+        UDim2.new(0, PAD, 0, Y + 4),
+        UDim2.new(1, -PAD*2 - 76, 0, 18),
+        "key  e.g.  rank_" .. (_LocalPlayer and tostring(_LocalPlayer.UserId) or "12345678"))
+    local readBtn = sBtn(page,
+        UDim2.new(1, -PAD - 68, 0, Y + 4),
+        UDim2.fromOffset(68, 18),
+        "READ KEY", accent, COL.BG)
+    Y = Y + 26
+
+    local resultF = sF(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 0, 48), COL.ROW_A, 0.25)
+    sCorner(resultF, 4); sStroke(resultF, accent, 0.70)
+    local resultL = sL(resultF, UDim2.fromOffset(6, 2), UDim2.new(1, -12, 1, -4),
+        "Result will appear here.", 8, COL.DIM)
+    resultL.TextWrapped = true; resultL.TextYAlignment = Enum.TextYAlignment.Top
+    Y = Y + 52
+
+    local scanBtn = sBtn(page,
+        UDim2.new(0, PAD, 0, Y),
+        UDim2.new(1, -PAD*2, 0, 18),
+        "SCAN COMMON RANK / ROLE KEYS  (uses your UserId)", accent, COL.BG)
+    Y = Y + 24
+
+    local scanSF = sScroll(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 0, 56))
+    sStroke(scanSF, accent, 0.65)
+    Y = Y + 60
+
+    Y = Y + secHdr(page, Y, "PERSISTENT POISONING REFERENCE", accent)
+    local refSF = sScroll(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 1, -Y - 4))
+
+    local REF = {
+        { "KEY POISONING PATH:", COL.TEXT },
+        { "  Client -> unsecured Remote -> Server A writes crafted value", COL.DIM },
+        { "  -> DataStoreService:SetAsync(\"rank_userId\", \"Owner\")", COL.DIM },
+        { "  -> Server B reads key -> grants elevated authority", COL.DIM },
+        { "  -> PERSISTS across sessions and server restarts", COL.ERR },
+        { "", COL.DIM },
+        { "UNSAFE:  if DS:GetAsync(\"rank_\"..uid) == \"Admin\" then grantAdmin()", COL.ERR },
+        { "SAFE:    derive permissions from server-signed session, never DS alone.", COL.OK },
+    }
+    for i, r in ipairs(REF) do logRow(refSF, r[1], r[2], i) end
+
+    readBtn.MouseButton1Click:Connect(function()
+        local store = storeTB.Text:gsub("%s+",""); local key = keyTB.Text:gsub("%s+","")
+        if store == "" or key == "" then resultL.Text = "Enter store name and key."; resultL.TextColor3 = COL.WARN; return end
+        resultL.Text = "Reading..."; resultL.TextColor3 = COL.DIM
+        local ok, val = pcall(function() return _DSSvc:GetDataStore(store):GetAsync(key) end)
+        if ok then
+            resultL.Text      = val == nil and "[nil -- key not found]" or tostring(val):sub(1, 220)
+            resultL.TextColor3 = val ~= nil and accent or COL.DIM
+        else
+            resultL.Text = "Failed: " .. tostring(val):sub(1,140); resultL.TextColor3 = COL.ERR
+        end
+    end)
+
+    local scanIdx = 0
+    scanBtn.MouseButton1Click:Connect(function()
+        for _, c in ipairs(scanSF:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+        scanIdx = 0
+        local store = storeTB.Text:gsub("%s+","")
+        if store == "" then
+            scanIdx = scanIdx + 1; logRow(scanSF, "Enter a store name above first.", COL.WARN, scanIdx); return
+        end
+        local uid  = _LocalPlayer and _LocalPlayer.UserId or 0
+        local name = _LocalPlayer and _LocalPlayer.Name   or "Player"
+        local keys = { "rank_"..uid, "role_"..uid, "admin_"..uid, "perm_"..uid,
+                        "rank_"..name, "admin_"..name, "data_"..uid, "inv_"..uid }
+        for _, k in ipairs(keys) do
+            local ok, val = pcall(function() return _DSSvc:GetDataStore(store):GetAsync(k) end)
+            local display = ok and (val ~= nil and tostring(val):sub(1,36) or "[nil]")
+                               or "ERR: " .. tostring(val):sub(1,28)
+            local low  = ok and val ~= nil and tostring(val):lower() or ""
+            local rCol = not ok and COL.ERR
+                      or (val ~= nil and (low:find("admin") or low:find("owner") or low:find("true"))
+                          and COL.ERR or (val ~= nil and COL.WARN or COL.DIM))
+            scanIdx = scanIdx + 1
+            logRow(scanSF, k .. "  ->  " .. display, rCol, scanIdx)
+            task.wait(0.3)
+        end
+    end)
+end
+
+-- ================================================================
+--   TP TAB  --  TeleportService
+-- ================================================================
+local function buildTpTab(page)
+    local PAD = 8
+    local Y   = 0
+    local accent = COL.TP
+
+    Y = Y + secHdr(page, Y, "TELEPORTDATA INSPECTOR", accent)
+
+    local readBtn = sBtn(page,
+        UDim2.new(0, PAD, 0, Y + 4),
+        UDim2.fromOffset(118, 18),
+        "READ ARRIVAL DATA", accent, COL.BG)
+    sL(page, UDim2.new(0, PAD + 124, 0, Y + 4), UDim2.new(1, -PAD - 124, 0, 18),
+        "PlaceId: " .. tostring(game.PlaceId) .. "   GameId: " .. tostring(game.GameId),
+        8, COL.DIM)
+    Y = Y + 26
+
+    local dataF = sF(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 0, 76), COL.ROW_A, 0.20)
+    sCorner(dataF, 4); sStroke(dataF, accent, 0.65)
+    local dataL = sL(dataF, UDim2.fromOffset(6, 4), UDim2.new(1, -12, 1, -8),
+        "Press READ ARRIVAL DATA to inspect TeleportData carried into this server.\n"
+     .. "If nil, this player did not arrive via TeleportAsync, or data was not set.",
+        8, COL.DIM)
+    dataL.TextWrapped = true; dataL.TextYAlignment = Enum.TextYAlignment.Top
+    Y = Y + 80
+
+    local riskF = sF(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 0, 20), COL.ROW_A, 0.35)
+    sCorner(riskF, 4)
+    local riskL = sL(riskF, UDim2.fromOffset(6, 0), UDim2.new(1, -12, 1, 0),
+        "No credential patterns detected.", 8, COL.DIM)
+    Y = Y + 24
+
+    Y = Y + secHdr(page, Y, "CREDENTIAL CARRY REFERENCE", accent)
+    local refSF = sScroll(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 1, -Y - 4))
+
+    local REF = {
+        { "SAFE arrival check:", COL.OK },
+        { "  local d = TeleportService:GetLocalPlayerTeleportData()", COL.DIM },
+        { "  -- NEVER grant authority from d alone.", COL.DIM },
+        { "  -- Re-derive permissions server-side independently.", COL.DIM },
+        { "", COL.DIM },
+        { "UNSAFE:  if d and d.isAdmin then grantAdmin(player) end", COL.ERR },
+        { "", COL.DIM },
+        { "PLACE-HOP CHAIN:", COL.TEXT },
+        { "  1. Find a weaker sub-place in the game universe.", COL.DIM },
+        { "  2. Exploit an unsecured Remote there to pack crafted TeleportData.", COL.DIM },
+        { "  3. TeleportAsync to the main PlaceId carrying forged credentials.", COL.DIM },
+        { "  4. Main server reads TeleportData and trusts it -- no way to verify origin.", COL.ERR },
+        { "", COL.DIM },
+        { "Credential keys to flag in TeleportData:", COL.WARN },
+        { "  isAdmin  rank  role  perms  owner  trusted  auth  token  session", COL.DIM },
+    }
+    for i, r in ipairs(REF) do logRow(refSF, r[1], r[2], i) end
+
+    readBtn.MouseButton1Click:Connect(function()
+        local ok, data = pcall(function() return _TpSvc:GetLocalPlayerTeleportData() end)
+        if not ok then
+            dataL.Text = "GetLocalPlayerTeleportData failed: " .. tostring(data):sub(1,80)
+            dataL.TextColor3 = COL.ERR; return
+        end
+        if data == nil then
+            dataL.Text = "[nil]  No TeleportData on this arrival."
+            dataL.TextColor3 = COL.DIM
+            riskL.Text = "No arrival data -- no credential risk detected."; riskL.TextColor3 = COL.OK; return
+        end
+        -- Render table recursively
+        local lines = {}
+        local function recurse(t, indent)
+            if type(t) ~= "table" then table.insert(lines, indent .. tostring(t)); return end
+            for k, v in pairs(t) do
+                if type(v) == "table" then
+                    table.insert(lines, indent .. tostring(k) .. ":")
+                    recurse(v, indent .. "  ")
+                else
+                    table.insert(lines, indent .. tostring(k) .. " = " .. tostring(v))
+                end
+            end
+        end
+        recurse(data, "")
+        dataL.Text      = table.concat(lines, "\n"):sub(1, 400)
+        dataL.TextColor3 = accent
+        -- Flag credential keys
+        local raw = dataL.Text:lower()
+        local flags = {}
+        for _, key in ipairs({"isadmin","rank","role","perms","owner","trusted","auth","token","session"}) do
+            if raw:find(key) then table.insert(flags, key) end
+        end
+        if #flags > 0 then
+            riskL.Text = "!! CREDENTIAL KEYS: " .. table.concat(flags, ", ") .. " -- verify no server trusts these without independent check."
+            riskL.TextColor3 = COL.ERR
+        else
+            riskL.Text = "No common credential patterns found in TeleportData."; riskL.TextColor3 = COL.OK
+        end
+    end)
+end
+
+-- ================================================================
+--   PKT TAB  --  Packet layer / NetworkOwnership
+-- ================================================================
+local function buildPktTab(page)
+    local PAD = 8
+    local Y   = 0
+    local accent = COL.PKT
+
+    Y = Y + secHdr(page, Y, "NETWORK OWNERSHIP SCANNER", accent)
+
+    local scanBtn = sBtn(page,
+        UDim2.new(0, PAD, 0, Y + 4),
+        UDim2.fromOffset(118, 18),
+        "SCAN WORKSPACE", accent, COL.BG)
+    local countL = sL(page,
+        UDim2.new(0, PAD + 124, 0, Y + 4),
+        UDim2.new(1, -PAD - 124, 0, 18),
+        "Parts owned by LocalPlayer: --", 8, COL.DIM)
+    Y = Y + 26
+
+    local ownSF = sScroll(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 0, 80))
+    sStroke(ownSF, accent, 0.65)
+    Y = Y + 84
+
+    local clearBtn = sBtn(page,
+        UDim2.new(1, -PAD - 56, 0, Y),
+        UDim2.fromOffset(56, 16),
+        "CLEAR", COL.ERR, COL.TEXT)
+    Y = Y + 22
+
+    Y = Y + secHdr(page, Y, "OWNERSHIP ATTACK SURFACE", accent)
+    local refSF = sScroll(page, UDim2.new(0, PAD, 0, Y), UDim2.new(1, -PAD*2, 1, -Y - 4))
+
+    local REF = {
+        { "CLIENT PHYSICS AUTHORITY:", COL.TEXT },
+        { "  Character HumanoidRootPart: owned by that player's client.", COL.DIM },
+        { "  Loose unanchored parts: ownership can transfer on touch or weld.", COL.DIM },
+        { "  Your client drives physics for owned parts -- replicates to server.", COL.DIM },
+        { "", COL.DIM },
+        { "ATTACK VECTORS:", COL.WARN },
+        { "  Speed/teleport: position replication trusted from character owner", COL.DIM },
+        { "    before anti-cheat latency catches up.", COL.DIM },
+        { "  Part weld grab: weld a BasePart to your character -> your client", COL.DIM },
+        { "    drives its physics -> server replicates the crafted position.", COL.DIM },
+        { "  Ownership race window: brief window during NetworkOwner transfer", COL.DIM },
+        { "    where neither client nor server has authoritative control.", COL.DIM },
+        { "", COL.DIM },
+        { "DESERIALIZATION SURFACE:", COL.ERR },
+        { "  Roblox client parses property-replication packets in C++. A", COL.DIM },
+        { "  malformed packet for a specific property type may trigger a parse", COL.DIM },
+        { "  bug. Finding this requires binary RE of RobloxPlayerBeta.exe.", COL.DIM },
+        { "  Impact if found: RCE on game server VM -- true FE bypass.", COL.ERR },
+        { "", COL.DIM },
+        { "MITIGATION:", COL.OK },
+        { "  Anchor all authority-granting parts server-side.", COL.DIM },
+        { "  Validate character state server-side on every trust decision.", COL.DIM },
+        { "  Never trust part position or CFrame as an authority source.", COL.DIM },
+    }
+    for i, r in ipairs(REF) do logRow(refSF, r[1], r[2], i) end
+
+    local ownIdx = 0
+    scanBtn.MouseButton1Click:Connect(function()
+        for _, c in ipairs(ownSF:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+        ownIdx = 0
+        local count = 0
+        for _, part in ipairs(workspace:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local ok, owner = pcall(function() return part:GetNetworkOwner() end)
+                if ok and owner == _LocalPlayer then
+                    count = count + 1
+                    local pos = part.Position
+                    ownIdx = ownIdx + 1
+                    logRow(ownSF,
+                        string.format("[OWN]  %-30s  %.1f  %.1f  %.1f",
+                            part:GetFullName():sub(-38), pos.X, pos.Y, pos.Z),
+                        accent, ownIdx)
+                end
+            end
+        end
+        countL.Text      = "Parts owned by LocalPlayer: " .. count
+        countL.TextColor3 = count > 0 and accent or COL.DIM
+        if count == 0 then ownIdx = 1; logRow(ownSF, "No LocalPlayer-owned parts found in workspace.", COL.DIM, 1) end
+    end)
+    clearBtn.MouseButton1Click:Connect(function()
+        for _, c in ipairs(ownSF:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+        ownIdx = 0; countL.Text = "Parts owned by LocalPlayer: --"; countL.TextColor3 = COL.DIM
+    end)
+end
+
+-- ================================================================
+--   MAIN BUILDER
+-- ================================================================
+local SVC_MODULE = {}
+
+local function buildSvcPanel(parent)
+    -- Root fills the entire SVC tab page
+    local root = Instance.new("Frame")
+    root.Name                   = "SVCPanel"
+    root.Size                   = UDim2.new(1, 0, 1, 0)
+    root.Position               = UDim2.new(0, 0, 0, 0)
+    root.BackgroundColor3       = COL.BG
+    root.BackgroundTransparency = 0.06
+    root.BorderSizePixel        = 0
+    root.ClipsDescendants       = true
+    root.ZIndex                 = BZ
+    root.Parent                 = parent
+    sCorner(root, 6)
+    sStroke(root, COL.BORDER, 0.35)
+
+    -- Header bar
+    local HDR_H = 30
+    local hdrF = sF(root, UDim2.new(0,0,0,0), UDim2.new(1,0,0,HDR_H), COL.HDR, 0.08)
+    sCorner(hdrF, 6)
+    sL(hdrF, UDim2.fromOffset(10,0), UDim2.new(1,-10,1,0),
+        "[SVC]  SERVICES ANALYSIS LAYER", 10, COL.TEXT, Enum.TextXAlignment.Left)
+
+    -- Sub-tab strip
+    local TAB_H     = 24
+    local tabBarF   = sF(root, UDim2.new(0,0,0,HDR_H), UDim2.new(1,0,0,TAB_H),
+        Color3.fromRGB(10,13,22), 0.15)
+    local CONTENT_Y = HDR_H + TAB_H
+
+    local subDefs = {
+        { label = "MSG", accent = COL.MSG, build = buildMsgTab },
+        { label = "MEM", accent = COL.MEM, build = buildMemTab },
+        { label = "DS",  accent = COL.DS,  build = buildDsTab  },
+        { label = "TP",  accent = COL.TP,  build = buildTpTab  },
+        { label = "PKT", accent = COL.PKT, build = buildPktTab },
+    }
+
+    local pages   = {}
+    local sBtns   = {}
+    local actSub  = 1
+    local tabX    = 4
+
+    for i, sd in ipairs(subDefs) do
+        local tw = math.max(36, #sd.label * 7 + 16)
+        local tb = Instance.new("TextButton")
+        tb.Position               = UDim2.fromOffset(tabX, 3)
+        tb.Size                   = UDim2.fromOffset(tw, TAB_H - 6)
+        tb.BackgroundColor3       = sd.accent
+        tb.BackgroundTransparency = 0.80
+        tb.BorderSizePixel        = 0
+        tb.Text                   = sd.label
+        tb.TextSize               = 9
+        tb.Font                   = Enum.Font.GothamBold
+        tb.TextColor3             = COL.DIM
+        tb.AutoButtonColor        = false
+        tb.ZIndex                 = BZ + 2
+        tb.Parent                 = tabBarF
+        sCorner(tb, 4)
+        sBtns[i] = tb
+        tabX = tabX + tw + 3
+
+        local pg = Instance.new("Frame")
+        pg.Position               = UDim2.new(0, 0, 0, CONTENT_Y)
+        pg.Size                   = UDim2.new(1, 0, 1, -CONTENT_Y)
+        pg.BackgroundTransparency = 1
+        pg.BorderSizePixel        = 0
+        pg.ClipsDescendants       = true
+        pg.Visible                = (i == 1)
+        pg.ZIndex                 = BZ
+        pg.Parent                 = root
+        pages[i] = pg
+
+        sd.build(pg)
+    end
+
+    local function switchSub(idx)
+        actSub = idx
+        for i, pg in ipairs(pages) do
+            pg.Visible                        = (i == idx)
+            sBtns[i].TextColor3             = (i == idx) and COL.TEXT or COL.DIM
+            sBtns[i].BackgroundTransparency = (i == idx) and 0.45     or 0.80
+        end
+    end
+    for i, tb in ipairs(sBtns) do
+        local ci = i; tb.MouseButton1Click:Connect(function() switchSub(ci) end)
+    end
+    switchSub(1)
+
+    return root
+end
+
+function SVC_MODULE:init(parent)
+    self.panel = buildSvcPanel(parent)
+    return self.panel
+end
+
+return SVC_MODULE
+end)()
 
 -- ==================================================================
 --   SERVICES
@@ -17066,6 +17813,7 @@ end)()
 --   S->S, HPDC, Console, C2, or HTTP tabs. Starts the background
 --   crawler loop immediately.
 -- ====================================================================
+SVC:init(SVCPage)
 DAL:init(DALPage)
 
 
