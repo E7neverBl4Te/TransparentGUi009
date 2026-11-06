@@ -10599,12 +10599,23 @@ playOpenAnimation()
 -- ==================================================================
 local SVC = (function()
 
-local _Players   = game:GetService("Players")
+-- Players and TeleportService are safe from LocalScript context.
+-- MessagingService, MemoryStoreService, DataStoreService are
+-- server-restricted. Getting them at module-load time triggers an
+-- internal Roblox auth check that calls a nil locale callback in
+-- executor context. Keep them nil here and fetch lazily inside
+-- button callbacks, wrapped in pcall.
+local _Players     = game:GetService("Players")
 local _LocalPlayer = _Players.LocalPlayer
-local _MsgSvc    = game:GetService("MessagingService")
-local _MemSvc    = game:GetService("MemoryStoreService")
-local _DSSvc     = game:GetService("DataStoreService")
-local _TpSvc     = game:GetService("TeleportService")
+local _TpSvc       = game:GetService("TeleportService")
+local _MsgSvc      = nil  -- fetched lazily in MSG subscribe callback
+local _MemSvc      = nil  -- fetched lazily in MEM read callback
+local _DSSvc       = nil  -- fetched lazily in DS probe/scan callbacks
+
+local function getSvc(name)
+    local ok, s = pcall(function() return game:GetService(name) end)
+    return ok and s or nil
+end
 
 local COL = {
     BG     = Color3.fromRGB( 8,  10,  18),
@@ -10848,6 +10859,10 @@ local function buildMsgTab(page)
             statusL.Text = "Unsubscribed: " .. topic; statusL.TextColor3 = COL.DIM
             return
         end
+        _MsgSvc = _MsgSvc or getSvc("MessagingService")
+        if not _MsgSvc then
+            statusL.Text = "MessagingService unavailable in this context."; statusL.TextColor3 = COL.ERR; return
+        end
         local ok, err = pcall(function()
             activeConn = _MsgSvc:SubscribeAsync(topic, function(msg)
                 logIdx = logIdx + 1
@@ -10942,6 +10957,10 @@ local function buildMemTab(page)
     readBtn.MouseButton1Click:Connect(function()
         local key = keyTB.Text:gsub("%s+", "")
         if key == "" then resultL.Text = "Enter a key name."; resultL.TextColor3 = COL.WARN; return end
+        _MemSvc = _MemSvc or getSvc("MemoryStoreService")
+        if not _MemSvc then
+            resultL.Text = "MemoryStoreService unavailable in this context."; resultL.TextColor3 = COL.ERR; return
+        end
         local ok, val = pcall(function()
             if storeTypes[storeIdx] == "SortedMap" then
                 return _MemSvc:GetSortedMap("SVC_PROBE"):GetAsync(key)
@@ -11019,6 +11038,10 @@ local function buildDsTab(page)
     readBtn.MouseButton1Click:Connect(function()
         local store = storeTB.Text:gsub("%s+",""); local key = keyTB.Text:gsub("%s+","")
         if store == "" or key == "" then resultL.Text = "Enter store name and key."; resultL.TextColor3 = COL.WARN; return end
+        _DSSvc = _DSSvc or getSvc("DataStoreService")
+        if not _DSSvc then
+            resultL.Text = "DataStoreService unavailable in this context."; resultL.TextColor3 = COL.ERR; return
+        end
         resultL.Text = "Reading..."; resultL.TextColor3 = COL.DIM
         local ok, val = pcall(function() return _DSSvc:GetDataStore(store):GetAsync(key) end)
         if ok then
@@ -11036,6 +11059,10 @@ local function buildDsTab(page)
         local store = storeTB.Text:gsub("%s+","")
         if store == "" then
             scanIdx = scanIdx + 1; logRow(scanSF, "Enter a store name above first.", COL.WARN, scanIdx); return
+        end
+        _DSSvc = _DSSvc or getSvc("DataStoreService")
+        if not _DSSvc then
+            scanIdx = scanIdx + 1; logRow(scanSF, "DataStoreService unavailable in this context.", COL.ERR, scanIdx); return
         end
         local uid  = _LocalPlayer and _LocalPlayer.UserId or 0
         local name = _LocalPlayer and _LocalPlayer.Name   or "Player"
