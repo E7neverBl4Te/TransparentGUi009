@@ -10279,9 +10279,9 @@ end
 -- in this file. This reference lets the DAL section (appended below)
 -- populate the page once DAL:init() actually exists.
 local DALPage = tabPages[#TAB_DEFS]
--- SVC tab is at index 3 (replaced the Settings stub).
--- Captured here so SVC:init() can populate it after the IIFE is defined.
-local SVCPage = tabPages[3]
+-- SVCPage is NOT declared as a main-chunk local. The main chunk was
+-- already near Lua's 200-register limit (see DAL IIFE comment below).
+-- SVC and its page reference live inside a do...end block instead.
 
 -- RESIZE GRIP (parented to PanelShell -- outside ClipsDescendants)
 local GripSize = T.RESIZE_GRIP
@@ -10594,9 +10594,12 @@ playOpenAnimation()
 
 -- ==================================================================
 --   SVC MODULE  --  Services Analysis Layer
---   Wrapped in an IIFE for the same register-budget reason as DAL.
---   Mounts into SVCPage (the renamed Settings tab) via SVC:init().
+--   Wrapped in a do...end block so 'local SVC' does NOT consume a
+--   main-chunk register (the main chunk is already near Lua's 200-
+--   register limit -- see the DAL IIFE comment below). The IIFE
+--   itself keeps SVC's internals in their own function scope.
 -- ==================================================================
+do
 local SVC = (function()
 
 -- Players and TeleportService are safe from LocalScript context.
@@ -17845,7 +17848,8 @@ end)()
 --   S->S, HPDC, Console, C2, or HTTP tabs. Starts the background
 --   crawler loop immediately.
 -- ====================================================================
-SVC:init(SVCPage)
+SVC:init(tabPages[3])  -- tabPages[3] = SVC tab page (index matches TAB_DEFS)
+end  -- closes do block; SVC local never entered the main-chunk register pool
 DAL:init(DALPage)
 
 
