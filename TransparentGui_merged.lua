@@ -158,7 +158,6 @@ ScreenGui.Name           = "TransparentGui"
 ScreenGui.ResetOnSpawn   = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
 ScreenGui.IgnoreGuiInset = true
-ScreenGui.AutoLocalize   = false   -- disables locale callbacks for the whole tree
 ScreenGui.Parent         = PlayerGui
 
 -- PANEL SHELL (holds UIStroke -- stays unclipped)
